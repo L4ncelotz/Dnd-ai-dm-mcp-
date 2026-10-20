@@ -41,7 +41,7 @@ describe('GameService Persistence & Transactions', () => {
 
     expect(state.campaignId).toBe(POC_CAMPAIGN_ID);
     expect(state.stateVersion).toBe(0);
-    expect(state.characters).toHaveLength(2);
+    expect(state.characters).toHaveLength(5);
 
     const hero = state.characters.find((c) => c.id === 'hero-1');
     expect(hero).toBeDefined();

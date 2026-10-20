@@ -1,6 +1,6 @@
 # AI Dungeon Master - MCP-first D&D Tabletop
 
-Status: **Phase 00 PoC implemented and verified** (2026-10-20).
+Status: **Phase 00 (MCP PoC) & Phase 01 (Game Core) implemented and verified** (2026-10-20).
 
 ## Mission
 
@@ -127,3 +127,27 @@ npm run db:reset
 
 - **ChatGPT Custom Actions / MCP**: Requires a public HTTPS endpoint (or secure tunnel such as Cloudflare Tunnel / ngrok) and is subject to workspace role gating. Localhost alone is not directly reachable by ChatGPT cloud servers.
 - **Authentication**: Set environment variable `MCP_AUTH_TOKEN=<secret>` to enforce Bearer token verification on all incoming MCP HTTP requests.
+
+---
+
+## Phase 01: Game Core Capabilities
+
+### 1. Three Canonical Premade Characters (Level 1, SRD 5.2.1)
+1. **Kaelen Stormborn (คาเลน สตอร์มบอร์น)** - Fighter (HP 12, AC 18, STR 16, Longsword +5, 1d8+3)
+2. **Lyra Dawnseeker (ไลรา ดอว์นซีคเกอร์)** - Cleric (HP 10, AC 18, WIS 16, Mace +4, 1d6+2)
+3. **Vael Whisperwind (วาเอล วิสเปอร์วินด์)** - Rogue (HP 9, AC 14, DEX 16, Shortsword +5, 1d6+3)
+
+### 2. SRD Dice Engine (`src/domain/dice.ts`)
+- Supports dice notation (`1d20+5`, `2d6+3`, `1d8+1d6+2`, `1d20-2`).
+- Supports advantage (`advantage`: roll 2d20, keep highest, track discarded) and disadvantage (`disadvantage`: roll 2d20, keep lowest).
+- Records full roll breakdown: dice terms, rolls, modifiers, and grand total.
+
+### 3. Generalized Transactional Command Service (`src/service/commandService.ts`)
+- Atomic state updates and event sourcing over SQLite.
+- Commands supported:
+  - `ATTACK`: weapon attacks, critical hit handling (doubled damage dice), AC check, damage application.
+  - `HEAL`: dice-based healing clamped to `maxHp`.
+  - `APPLY_DAMAGE`: environmental/trap damage clamped to 0.
+  - `MOVE`: 2D spatial coordinate updates.
+  - `REST`: short/long rests restoring character vitality.
+- Event replay (`commandService.replayEvents(campaignId)`) verifies state consistency from immutable audit logs.

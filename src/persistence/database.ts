@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { PREMADE_CHARACTERS } from '../domain/character.js';
 
 export const POC_CAMPAIGN_ID = 'poc-campaign';
 
@@ -40,9 +41,19 @@ export function initDatabase(config: DatabaseConfig = {}): DatabaseSync {
       id TEXT PRIMARY KEY,
       campaign_id TEXT NOT NULL,
       name TEXT NOT NULL,
+      name_th TEXT,
+      class_name TEXT,
+      class_name_th TEXT,
+      level INTEGER NOT NULL DEFAULT 1,
       hp INTEGER NOT NULL,
       max_hp INTEGER NOT NULL,
       armor_class INTEGER NOT NULL,
+      speed INTEGER NOT NULL DEFAULT 30,
+      abilities_json TEXT,
+      attacks_json TEXT,
+      inventory_json TEXT,
+      pos_x INTEGER NOT NULL DEFAULT 0,
+      pos_y INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     );
 
@@ -62,10 +73,44 @@ export function initDatabase(config: DatabaseConfig = {}): DatabaseSync {
       ON game_events(campaign_id, state_version);
   `);
 
+  // Run column migrations if characters table existed previously without rich columns
+  migrateCharactersTable(db);
+
   // Idempotent fixture seeding
   seedPocFixture(db);
 
   return db;
+}
+
+interface TableColumnInfo {
+  name: string;
+}
+
+function migrateCharactersTable(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(characters)').all() as unknown as TableColumnInfo[];
+  const existingCols: Record<string, true> = {};
+  for (const c of columns) {
+    existingCols[c.name] = true;
+  }
+
+  const migrations: Array<{ col: string; ddl: string }> = [
+    { col: 'name_th', ddl: 'ALTER TABLE characters ADD COLUMN name_th TEXT;' },
+    { col: 'class_name', ddl: 'ALTER TABLE characters ADD COLUMN class_name TEXT;' },
+    { col: 'class_name_th', ddl: 'ALTER TABLE characters ADD COLUMN class_name_th TEXT;' },
+    { col: 'level', ddl: 'ALTER TABLE characters ADD COLUMN level INTEGER NOT NULL DEFAULT 1;' },
+    { col: 'speed', ddl: 'ALTER TABLE characters ADD COLUMN speed INTEGER NOT NULL DEFAULT 30;' },
+    { col: 'abilities_json', ddl: 'ALTER TABLE characters ADD COLUMN abilities_json TEXT;' },
+    { col: 'attacks_json', ddl: 'ALTER TABLE characters ADD COLUMN attacks_json TEXT;' },
+    { col: 'inventory_json', ddl: 'ALTER TABLE characters ADD COLUMN inventory_json TEXT;' },
+    { col: 'pos_x', ddl: 'ALTER TABLE characters ADD COLUMN pos_x INTEGER NOT NULL DEFAULT 0;' },
+    { col: 'pos_y', ddl: 'ALTER TABLE characters ADD COLUMN pos_y INTEGER NOT NULL DEFAULT 0;' },
+  ];
+
+  for (const mig of migrations) {
+    if (!existingCols[mig.col]) {
+      db.exec(mig.ddl);
+    }
+  }
 }
 
 function seedPocFixture(db: DatabaseSync): void {
@@ -79,13 +124,72 @@ function seedPocFixture(db: DatabaseSync): void {
   insertCampaign.run(POC_CAMPAIGN_ID, now);
 
   const insertCharacter = db.prepare(`
-    INSERT OR IGNORE INTO characters (id, campaign_id, name, hp, max_hp, armor_class)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT OR IGNORE INTO characters (
+      id, campaign_id, name, name_th, class_name, class_name_th,
+      level, hp, max_hp, armor_class, speed,
+      abilities_json, attacks_json, inventory_json, pos_x, pos_y
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  // Hero fixture: 20/20 HP, AC 14
-  insertCharacter.run('hero-1', POC_CAMPAIGN_ID, 'Hero', 20, 20, 14);
+  // Phase 00 fixture characters (kept for backward compatibility with PoC tools)
+  insertCharacter.run(
+    'hero-1',
+    POC_CAMPAIGN_ID,
+    'Hero',
+    'ผู้กล้า',
+    'Fighter',
+    'นักรบ',
+    1,
+    20,
+    20,
+    14,
+    30,
+    JSON.stringify({ str: 16, dex: 12, con: 14, int: 10, wis: 12, cha: 10 }),
+    JSON.stringify([{ id: 'longsword', name: 'Longsword', nameTh: 'ดาบยาว', attackBonus: 5, damageFormula: '1d8+3', damageType: 'slashing' }]),
+    JSON.stringify([{ id: 'item-potion', name: 'Potion of Healing', nameTh: 'น้ำยาฟื้นพลังชีวิต', quantity: 1 }]),
+    0,
+    0
+  );
 
-  // Goblin fixture: 7/7 HP, AC 12
-  insertCharacter.run('goblin-1', POC_CAMPAIGN_ID, 'Goblin', 7, 7, 12);
+  insertCharacter.run(
+    'goblin-1',
+    POC_CAMPAIGN_ID,
+    'Goblin',
+    'ก็อบลิน',
+    'Monster',
+    'มอนสเตอร์',
+    1,
+    7,
+    7,
+    12,
+    30,
+    JSON.stringify({ str: 8, dex: 14, con: 10, int: 10, wis: 8, cha: 8 }),
+    JSON.stringify([{ id: 'scimitar', name: 'Scimitar', nameTh: 'ดาบโค้ง', attackBonus: 4, damageFormula: '1d6+2', damageType: 'slashing' }]),
+    JSON.stringify([]),
+    5,
+    5
+  );
+
+  // Phase 01: Three canonical premade level-1 player characters
+  for (const premade of PREMADE_CHARACTERS) {
+    insertCharacter.run(
+      premade.id,
+      POC_CAMPAIGN_ID,
+      premade.name,
+      premade.nameTh,
+      premade.className,
+      premade.classNameTh,
+      premade.level,
+      premade.hp,
+      premade.maxHp,
+      premade.armorClass,
+      premade.speed,
+      JSON.stringify(premade.abilities),
+      JSON.stringify(premade.attacks),
+      JSON.stringify(premade.inventory),
+      premade.position.x,
+      premade.position.y
+    );
+  }
 }
