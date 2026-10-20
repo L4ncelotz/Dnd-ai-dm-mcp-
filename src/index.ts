@@ -10,6 +10,8 @@ interface CliOptions {
   host: string;
   dbPath: string;
   remote: boolean;
+  allowedOrigins?: string[];
+  allowedHosts?: string[];
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -18,7 +20,12 @@ function parseArgs(args: string[]): CliOptions {
   let host = '127.0.0.1';
   let dbPath = 'data/poc.db';
   let remote = false;
-
+  let allowedOrigins: string[] | undefined = process.env.MCP_ALLOWED_ORIGINS
+    ? process.env.MCP_ALLOWED_ORIGINS.split(',').map((s) => s.trim())
+    : undefined;
+  let allowedHosts: string[] | undefined = process.env.MCP_ALLOWED_HOSTS
+    ? process.env.MCP_ALLOWED_HOSTS.split(',').map((s) => s.trim())
+    : undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--http') {
@@ -33,10 +40,14 @@ function parseArgs(args: string[]): CliOptions {
       dbPath = args[++i];
     } else if (arg === '--remote') {
       remote = true;
+    } else if (arg === '--allowed-origins' && i + 1 < args.length) {
+      allowedOrigins = args[++i].split(',').map((s) => s.trim());
+    } else if (arg === '--allowed-hosts' && i + 1 < args.length) {
+      allowedHosts = args[++i].split(',').map((s) => s.trim());
     }
   }
 
-  return { mode, port, host, dbPath, remote };
+  return { mode, port, host, dbPath, remote, allowedOrigins, allowedHosts };
 }
 
 async function main(): Promise<void> {
@@ -51,9 +62,10 @@ async function main(): Promise<void> {
       host: options.host,
       port: options.port,
       remoteMode: options.remote,
+      allowedOrigins: options.allowedOrigins,
+      allowedHosts: options.allowedHosts,
       gameService,
     });
-
     const shutdown = async () => {
       process.stderr.write('\n[dnd-mcp] Shutting down HTTP server...\n');
       await httpRunning.close();

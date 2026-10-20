@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "start": "tsx src/index.ts",
     "start:http": "tsx src/index.ts --http",
+    "start:remote": "tsx src/index.ts --http --remote",
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke:client": "tsx scripts/smoke-client.ts",

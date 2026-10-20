@@ -40,10 +40,19 @@ describe('AiWorkflowService (Phase 02)', () => {
     const db = initDatabase({ dbPath: ':memory:' });
     const rng = new DeterministicRng([15]);
     const svc = new AiWorkflowService(db, undefined, rng);
+    const prop = svc.proposeResolution({
+      campaignId: POC_CAMPAIGN_ID,
+      actionId: 'prop-check-1',
+      proposedResolutionType: 'ABILITY_CHECK',
+      dc: 12,
+      parameters: { characterId: 'char-rogue-1', ability: 'dex' },
+      explanation: 'Trap detection check',
+    });
 
     const result = svc.resolveAbilityCheck(
       { campaignId: POC_CAMPAIGN_ID, actionId: 'check-1', expectedVersion: 0 },
-      { characterId: 'char-rogue-1', ability: 'dex', dc: 12, reason: 'Trap detection' }
+      { characterId: 'char-rogue-1', ability: 'dex', dc: 12, reason: 'Trap detection' },
+      prop.actionId
     );
 
     // Rogue DEX 16 -> +3 mod; d20=15 -> total 18 >= 12

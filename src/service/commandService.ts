@@ -65,6 +65,7 @@ export interface AttackCommandResult {
   attackRoll: {
     d20: number;
     discardedD20?: number;
+    advantageMode?: AdvantageMode;
     attackBonus: number;
     total: number;
     targetAc: number;
@@ -225,7 +226,8 @@ export class CommandService {
         const recordedResult = JSON.parse(existingEvent.payload_json) as CommandExecutionResult;
 
         // P1-04: Strict full-request idempotency validation
-        if (existingEvent.type !== command.type || !this.isMatchingCommand(command, recordedResult)) {
+        // P1-04: Strict full-request idempotency validation (R5)
+        if (existingEvent.type !== command.type || !this.isMatchingCommand(command, recordedResult, pendingActionId)) {
           throw new ConflictError(
             `Action '${actionId}' has already been executed with different parameters`
           );
@@ -253,7 +255,7 @@ export class CommandService {
       // P1-03: Validate and consume pending action atomically in the same transaction
       if (pendingActionId) {
         const actorId = 'attackerId' in command ? command.attackerId : 'characterId' in command ? command.characterId : undefined;
-        this.validateAndConsumePendingAction(campaignId, pendingActionId, actorId);
+        this.validateAndConsumePendingAction(campaignId, pendingActionId, actorId, command.type);
       }
 
       // 3. Dispatch and execute specific command logic
@@ -409,6 +411,7 @@ export class CommandService {
       attackRoll: {
         d20,
         discardedD20,
+        advantageMode: cmd.advantageMode ?? 'none',
         attackBonus: weapon.attackBonus,
         total: totalAttack,
         targetAc: target.armorClass,
@@ -434,6 +437,29 @@ export class CommandService {
     const { targetId, amountFormula, source } = cmd;
 
     const target = this.getCharacterSheet(campaignId, targetId);
+
+    // P1-05 (R8): Validate heal source & resource consumption
+    if (source.toLowerCase().includes('potion of healing')) {
+      const potionIdx = target.inventory.findIndex(
+        (i) => i.name.toLowerCase().includes('potion of healing') && i.quantity > 0
+      );
+      if (potionIdx === -1) {
+        throw new ValidationError("Cannot use 'Potion of Healing': Item not found in inventory");
+      }
+      if (amountFormula !== '2d4+2' && amountFormula !== '2d4 + 2') {
+        throw new ValidationError(
+          `Invalid healing formula '${amountFormula}' for 'Potion of Healing'. Expected '2d4+2' (SRD 5.2.1)`
+        );
+      }
+      target.inventory[potionIdx].quantity -= 1;
+      if (target.inventory[potionIdx].quantity === 0) {
+        target.inventory.splice(potionIdx, 1);
+      }
+      this.db
+        .prepare('UPDATE characters SET inventory_json = ? WHERE campaign_id = ? AND id = ?')
+        .run(JSON.stringify(target.inventory), campaignId, targetId);
+    }
+
     const healRoll = DiceParser.roll(amountFormula, this.rng);
     const amountHealed = Math.max(1, healRoll.total);
 
@@ -509,11 +535,39 @@ export class CommandService {
     const previousPosition = { ...char.position };
     const newPosition = { x: toX, y: toY };
 
-    // P1-06: Constrain movement speed
+    // P1-06 & P1-05 (R7): Enforce movement budget per round and speed constraint
     const distance = Math.hypot(toX - char.position.x, toY - char.position.y) * 5;
     if (distance > char.speed) {
       throw new ValidationError(`Movement distance of ${Math.round(distance)}ft exceeds speed of ${char.speed}ft`);
     }
+
+    const roundNumber = Math.max(1, Math.floor(nextVersion / 2));
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS movement_budgets (
+        campaign_id TEXT NOT NULL,
+        character_id TEXT NOT NULL,
+        round_number INTEGER NOT NULL,
+        feet_moved REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (campaign_id, character_id, round_number)
+      );
+    `);
+    const budgetRow = this.db
+      .prepare('SELECT feet_moved FROM movement_budgets WHERE campaign_id = ? AND character_id = ? AND round_number = ?')
+      .get(campaignId, characterId, roundNumber) as { feet_moved: number } | undefined;
+    const priorFeetMoved = budgetRow ? budgetRow.feet_moved : 0;
+    if (priorFeetMoved + distance > char.speed) {
+      throw new ValidationError(
+        `Cumulative movement (${Math.round(priorFeetMoved + distance)}ft) exceeds turn speed budget of ${char.speed}ft`
+      );
+    }
+    this.db
+      .prepare(`
+        INSERT INTO movement_budgets (campaign_id, character_id, round_number, feet_moved)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(campaign_id, character_id, round_number)
+        DO UPDATE SET feet_moved = feet_moved + excluded.feet_moved
+      `)
+      .run(campaignId, characterId, roundNumber, distance);
 
     this.db
       .prepare('UPDATE characters SET pos_x = ?, pos_y = ? WHERE campaign_id = ? AND id = ?')
@@ -626,10 +680,10 @@ export class CommandService {
     };
   }
 
-  private validateAndConsumePendingAction(campaignId: string, pendingActionId: string, actorId?: string): void {
+  private validateAndConsumePendingAction(campaignId: string, pendingActionId: string, actorId?: string, commandType?: string): void {
     const pendingRow = this.db
-      .prepare('SELECT id, character_id, status FROM pending_actions WHERE campaign_id = ? AND id = ?')
-      .get(campaignId, pendingActionId) as { id: string; character_id: string; status: string } | undefined;
+      .prepare('SELECT id, character_id, status, action_type FROM pending_actions WHERE campaign_id = ? AND id = ?')
+      .get(campaignId, pendingActionId) as { id: string; character_id: string; status: string; action_type: string | null } | undefined;
 
     if (!pendingRow) {
       throw new NotFoundError(`Pending action '${pendingActionId}' not found in campaign '${campaignId}'`);
@@ -640,13 +694,19 @@ export class CommandService {
     if (actorId && pendingRow.character_id !== actorId) {
       throw new ValidationError(`Pending action was created by '${pendingRow.character_id}', not '${actorId}'`);
     }
+    // P1-05 (R8): Validate intent compatibility
+    if (pendingRow.action_type && commandType && pendingRow.action_type.toUpperCase() !== commandType.toUpperCase()) {
+      throw new ValidationError(
+        `Mismatched action intent: pending action is for '${pendingRow.action_type}', cannot resolve as '${commandType}'`
+      );
+    }
 
     this.db
       .prepare("UPDATE pending_actions SET status = 'resolved' WHERE campaign_id = ? AND id = ? AND status = 'pending'")
       .run(campaignId, pendingActionId);
   }
 
-  private isMatchingCommand(cmd: ActionCommand, result: unknown): boolean {
+  private isMatchingCommand(cmd: ActionCommand, result: unknown, pendingActionId?: string): boolean {
     if (!result || typeof result !== 'object') return false;
     const res = result as Record<string, unknown>;
 
@@ -654,7 +714,9 @@ export class CommandService {
       case 'ATTACK': {
         const weapon = res.weapon as { id: string } | undefined;
         const weaponMatches = !cmd.weaponId || weapon?.id === cmd.weaponId;
-        return res.attackerId === cmd.attackerId && res.targetId === cmd.targetId && weaponMatches;
+        const recordedAdv = (res.attackRoll as { advantageMode?: AdvantageMode })?.advantageMode ?? 'none';
+        const requestedAdv = cmd.advantageMode ?? 'none';
+        return res.attackerId === cmd.attackerId && res.targetId === cmd.targetId && weaponMatches && recordedAdv === requestedAdv;
       }
       case 'HEAL': {
         const healRoll = res.healRoll as { expression: string } | undefined;

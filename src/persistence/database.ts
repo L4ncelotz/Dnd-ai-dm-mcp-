@@ -190,7 +190,7 @@ function seedPocFixture(db: DatabaseSync): void {
     'ผู้กล้า',
     'Fighter',
     'นักรบ',
-    'player',
+    'test',
     'public',
     1,
     20,

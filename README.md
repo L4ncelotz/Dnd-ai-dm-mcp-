@@ -74,7 +74,7 @@ npm install
 
 ### 3. Run automated tests and typecheck
 ```bash
-npm test               # Run all 18 Vitest unit & integration tests
+npm test               # Run all 68 Vitest unit, integration & regression tests
 npm run typecheck      # Verify TypeScript types with tsc --noEmit
 ```
 
@@ -92,14 +92,27 @@ For local AI clients (Claude Desktop, MCP Inspector, local host CLI):
 npm start
 ```
 
-#### HTTP Transport (For Remote AI GUIs / Tunnels)
-For ChatGPT custom MCP connector, ngrok, or cloud tunnels:
+#### HTTP Transport (Local Development)
+Listens locally on loopback (`http://127.0.0.1:3000/mcp`):
 ```bash
 npm run start:http
-# Default listens on http://127.0.0.1:3000/mcp
-# Custom port/host:
-npx tsx src/index.ts --http --port 8080 --host 0.0.0.0
 ```
+
+#### HTTP Transport (Secured Remote / Tunnel Deployment)
+Enforces fail-closed token authentication and disallows wildcard CORS:
+```bash
+MCP_AUTH_TOKEN="your-strong-secret" npm run start:remote
+
+# With trusted origins and hosts:
+MCP_AUTH_TOKEN="your-strong-secret" npx tsx src/index.ts --http --remote --allowed-origins "https://chatgpt.com" --allowed-hosts "tunnel.yourdomain.com"
+```
+
+### Secure Tunnel Checklist (Cloudflare Tunnel / ngrok)
+1. Set a strong `MCP_AUTH_TOKEN` in your environment.
+2. Always launch the server using `npm run start:remote` (enforces strict origin and token controls).
+3. Configure tunnel to forward to `http://127.0.0.1:3000`.
+4. Restrict allowed origins to the authorized AI host (e.g. `--allowed-origins https://chatgpt.com`).
+5. Register the public HTTPS endpoint and Bearer token in the AI host's custom MCP connectors settings.
 
 Check server health:
 ```bash

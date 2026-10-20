@@ -43,7 +43,7 @@ export async function startHttpServer(config: HttpServerConfig): Promise<Running
   });
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    // 1. Origin validation
+    // 1. P2-01 (R10): Origin validation & no wildcard CORS in remote mode
     const originHeader = req.headers.origin;
     if (config.allowedOrigins && config.allowedOrigins.length > 0) {
       if (originHeader && !config.allowedOrigins.includes(originHeader)) {
@@ -51,6 +51,13 @@ export async function startHttpServer(config: HttpServerConfig): Promise<Running
         res.end(JSON.stringify({ error: 'Forbidden: Disallowed Origin' }));
         return;
       }
+    } else if (remoteMode && originHeader) {
+      // Disallow wildcard CORS in remote mode without explicit allowedOrigins
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({ error: 'Forbidden: Remote mode requires explicit allowedOrigins for cross-origin requests' })
+      );
+      return;
     }
 
     // 2. Host header validation
@@ -63,15 +70,20 @@ export async function startHttpServer(config: HttpServerConfig): Promise<Running
       }
     }
 
-    // CORS headers
+    // CORS headers: strictly no wildcard in remote mode
     const corsOrigin = config.allowedOrigins?.length
-      ? (originHeader && config.allowedOrigins.includes(originHeader) ? originHeader : config.allowedOrigins[0])
+      ? originHeader && config.allowedOrigins.includes(originHeader)
+        ? originHeader
+        : config.allowedOrigins[0]
+      : remoteMode
+      ? ''
       : '*';
 
-    res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    if (corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, mcp-session-id, mcp-protocol-version');
-
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
@@ -116,7 +128,14 @@ export async function startHttpServer(config: HttpServerConfig): Promise<Running
       }
 
       const isReadMethod = req.method === 'GET' || req.method === 'HEAD';
-      const requestBody = isReadMethod ? null : Readable.toWeb(req);
+      // P2-02 (R11): Enforce byte limits on streamed/chunked request bodies
+      let excessBytesDetected = false;
+      const requestBody = isReadMethod
+        ? null
+        : createBoundedBodyStream(req, maxBodyBytes, () => {
+            excessBytesDetected = true;
+          });
+
       const webReq = new Request(fullUrl, {
         method: req.method,
         headers,
@@ -126,13 +145,26 @@ export async function startHttpServer(config: HttpServerConfig): Promise<Running
 
       const webRes = await handler.fetch(webReq);
 
+      // P2-02 (R11): If chunked payload exceeded maxBytes, override MCP handler's 400 with 413
+      if (excessBytesDetected) {
+        if (!res.headersSent) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+        }
+        res.end(
+          JSON.stringify({
+            error: 'Payload Too Large',
+            message: `Request body exceeded limit of ${maxBodyBytes} bytes`,
+          })
+        );
+        return;
+      }
+
       const responseHeaders: Record<string, string> = {};
       webRes.headers.forEach((val, key) => {
         responseHeaders[key] = val;
       });
 
       res.writeHead(webRes.status, responseHeaders);
-
       if (webRes.body) {
         const reader = webRes.body.getReader();
         while (true) {
@@ -143,6 +175,27 @@ export async function startHttpServer(config: HttpServerConfig): Promise<Running
       }
       res.end();
     } catch (err) {
+      // P2-02 (R11): Handle streamed payload size violation
+      const isPayloadTooLarge =
+        err instanceof Error &&
+        (err.message === 'PAYLOAD_TOO_LARGE' || err.message.includes('PAYLOAD_TOO_LARGE'));
+      if (isPayloadTooLarge) {
+        req.resume();
+        if (!res.headersSent) {
+          res.writeHead(413, {
+            'Content-Type': 'application/json',
+            Connection: 'close',
+          });
+        }
+        res.end(
+          JSON.stringify({
+            error: 'Payload Too Large',
+            message: `Request body exceeded limit of ${maxBodyBytes} bytes`,
+          })
+        );
+        return;
+      }
+
       // P2-05: Redact internal exception leaks in public error responses; log details with incident ID
       const incidentId = randomUUID();
       process.stderr.write(
@@ -183,4 +236,36 @@ export async function startHttpServer(config: HttpServerConfig): Promise<Running
     });
   });
   return promise;
+}
+
+/**
+ * P2-02 (R11): Wraps an IncomingMessage stream in a bounded ReadableStream
+ * to enforce size limits on chunked transfer requests lacking Content-Length.
+ */
+function createBoundedBodyStream(
+  req: IncomingMessage,
+  maxBytes: number,
+  onExcess: () => void
+): ReadableStream<Uint8Array> {
+  let bytesReceived = 0;
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      req.on('data', (chunk: Buffer) => {
+        bytesReceived += chunk.length;
+        if (bytesReceived > maxBytes) {
+          onExcess();
+          req.pause();
+          controller.error(new Error('PAYLOAD_TOO_LARGE'));
+          return;
+        }
+        controller.enqueue(new Uint8Array(chunk));
+      });
+      req.on('end', () => {
+        controller.close();
+      });
+      req.on('error', (err) => {
+        controller.error(err);
+      });
+    },
+  });
 }

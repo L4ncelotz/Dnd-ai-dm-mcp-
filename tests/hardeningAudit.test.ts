@@ -141,13 +141,28 @@ describe('Phase 00-02 Hardening Audit Regression Suite', () => {
       const tools = await client.listTools();
       expect(tools.tools.map((t) => t.name)).toContain('resolve_ability_check');
 
-      // Execute resolve_ability_check via MCP
+      // 1. Propose resolution via MCP
+      const propCall = await client.callTool({
+        name: 'propose_resolution',
+        arguments: {
+          campaignId: POC_CAMPAIGN_ID,
+          actionId: 'mcp-prop-001',
+          proposedResolutionType: 'ABILITY_CHECK',
+          dc: 12,
+          parameters: { characterId: 'char-rogue-1', ability: 'dex', skill: 'Stealth' },
+          explanation: 'DC 12 Stealth check',
+        },
+      });
+      expect(propCall.isError).toBeFalsy();
+
+      // 2. Execute resolve_ability_check via MCP with locked proposal
       const checkCall = await client.callTool({
         name: 'resolve_ability_check',
         arguments: {
           campaignId: POC_CAMPAIGN_ID,
           actionId: 'mcp-check-001',
           expectedVersion: 0,
+          proposalId: 'mcp-prop-001',
           characterId: 'char-rogue-1',
           ability: 'dex',
           dc: 12,
@@ -378,18 +393,36 @@ describe('Phase 00-02 Hardening Audit Regression Suite', () => {
       const svc = new AiWorkflowService(db, undefined, rng);
 
       // 1. Rogue with DEX 16 (+3) and Stealth Expertise (+4) -> modifier = 7, total = 17
+      const propRogue = svc.proposeResolution({
+        campaignId: POC_CAMPAIGN_ID,
+        actionId: 'prop-rogue-stealth',
+        proposedResolutionType: 'ABILITY_CHECK',
+        dc: 15,
+        parameters: { characterId: 'char-rogue-1', ability: 'dex', skill: 'Stealth' },
+        explanation: 'DC 15 Stealth check',
+      });
       const rogueCheck = svc.resolveAbilityCheck(
         { campaignId: POC_CAMPAIGN_ID, actionId: 'prof-check-rogue', expectedVersion: 0 },
-        { characterId: 'char-rogue-1', ability: 'dex', dc: 15, skill: 'Stealth', reason: 'Hide' }
+        { characterId: 'char-rogue-1', ability: 'dex', dc: 15, skill: 'Stealth', reason: 'Hide' },
+        propRogue.actionId
       );
       expect(rogueCheck.modifier).toBe(7);
       expect(rogueCheck.total).toBe(17);
       expect(rogueCheck.isSuccess).toBe(true);
 
       // 2. Fighter with DEX 12 (+1) and NO Stealth proficiency -> modifier = 1, total = 11
+      const propFighter = svc.proposeResolution({
+        campaignId: POC_CAMPAIGN_ID,
+        actionId: 'prop-fighter-stealth',
+        proposedResolutionType: 'ABILITY_CHECK',
+        dc: 15,
+        parameters: { characterId: 'char-fighter-1', ability: 'dex', skill: 'Stealth' },
+        explanation: 'DC 15 Stealth check',
+      });
       const fighterCheck = svc.resolveAbilityCheck(
         { campaignId: POC_CAMPAIGN_ID, actionId: 'prof-check-fighter', expectedVersion: 1 },
-        { characterId: 'char-fighter-1', ability: 'dex', dc: 15, skill: 'Stealth', reason: 'Hide' }
+        { characterId: 'char-fighter-1', ability: 'dex', dc: 15, skill: 'Stealth', reason: 'Hide' },
+        propFighter.actionId
       );
       expect(fighterCheck.modifier).toBe(1);
       expect(fighterCheck.total).toBe(11);
@@ -493,6 +526,320 @@ describe('Phase 00-02 Hardening Audit Regression Suite', () => {
       expect(events[2].stateVersion).toBe(10);
 
       db.close();
+    });
+  });
+
+  // ==========================================
+  // Direct Reproductions: R1 through R11
+  // ==========================================
+  describe('Direct Reproductions: R1 through R11', () => {
+    it('R1: ability-check DC cannot be bypassed by omitting proposalId', () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const svc = new AiWorkflowService(db);
+
+      // Caller attempts to resolve with DC 1 without proposalId
+      expect(() =>
+        svc.resolveAbilityCheck(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r1-bypass', expectedVersion: 0 },
+          { characterId: 'char-rogue-1', ability: 'dex', dc: 1, reason: 'Unprompted DC 1' }
+        )
+      ).toThrow(ValidationError);
+
+      db.close();
+    });
+
+    it('R2: resolved proposals cannot be reused for fresh rolls', () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const rng = new DeterministicRng([12]);
+      const svc = new AiWorkflowService(db, undefined, rng);
+
+      const pending = svc.submitPlayerAction(POC_CAMPAIGN_ID, 'char-rogue-1', 'Sneak in');
+      const prop = svc.proposeResolution({
+        campaignId: POC_CAMPAIGN_ID,
+        actionId: 'r2-prop',
+        pendingActionId: pending.id,
+        proposedResolutionType: 'ABILITY_CHECK',
+        dc: 12,
+        parameters: { characterId: 'char-rogue-1', ability: 'dex', skill: 'Stealth' },
+        explanation: 'DC 12 Stealth',
+      });
+
+      // First resolution succeeds
+      svc.resolveAbilityCheck(
+        { campaignId: POC_CAMPAIGN_ID, actionId: 'r2-check-1', expectedVersion: 0 },
+        { characterId: 'char-rogue-1', ability: 'dex', dc: 12, skill: 'Stealth', reason: 'Sneak' },
+        prop.actionId,
+        pending.id
+      );
+
+      // R2: Second attempt with new actionId and updated version using same proposalId is REJECTED
+      expect(() =>
+        svc.resolveAbilityCheck(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r2-check-2', expectedVersion: 1 },
+          { characterId: 'char-rogue-1', ability: 'dex', dc: 12, skill: 'Stealth', reason: 'Sneak again' },
+          prop.actionId
+        )
+      ).toThrow(ConflictError);
+
+      db.close();
+    });
+
+    it('R3 & R4: locked proposal locks skill and pending action binding', () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const rng = new DeterministicRng([10]);
+      const svc = new AiWorkflowService(db, undefined, rng);
+
+      const pendingA = svc.submitPlayerAction(POC_CAMPAIGN_ID, 'char-rogue-1', 'Action A');
+      const pendingB = svc.submitPlayerAction(POC_CAMPAIGN_ID, 'char-rogue-1', 'Action B');
+
+      const prop = svc.proposeResolution({
+        campaignId: POC_CAMPAIGN_ID,
+        actionId: 'r3-r4-prop',
+        pendingActionId: pendingA.id,
+        proposedResolutionType: 'ABILITY_CHECK',
+        dc: 14,
+        parameters: { characterId: 'char-rogue-1', ability: 'dex', skill: 'Stealth' },
+        explanation: 'Stealth check bound to A',
+      });
+
+      // R3: Proposal established Stealth; caller passes Acrobatics -> ConflictError
+      expect(() =>
+        svc.resolveAbilityCheck(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r3-check', expectedVersion: 0 },
+          { characterId: 'char-rogue-1', ability: 'dex', dc: 14, skill: 'Acrobatics', reason: 'Sneak' },
+          prop.actionId,
+          pendingA.id
+        )
+      ).toThrow(ConflictError);
+
+      // R4: Proposal bound to pendingA; caller passes pendingB -> ConflictError
+      expect(() =>
+        svc.resolveAbilityCheck(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r4-check', expectedVersion: 0 },
+          { characterId: 'char-rogue-1', ability: 'dex', dc: 14, skill: 'Stealth', reason: 'Sneak' },
+          prop.actionId,
+          pendingB.id
+        )
+      ).toThrow(ConflictError);
+
+      db.close();
+    });
+
+    it('R5: action idempotency rejects changed advantageMode on duplicate actionId', () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const rng = new DeterministicRng([10, 4]);
+      const cmdSvc = new CommandService(db, rng);
+
+      cmdSvc.executeCommand(
+        { campaignId: POC_CAMPAIGN_ID, actionId: 'r5-act', expectedVersion: 0 },
+        { type: 'ATTACK', attackerId: 'char-fighter-1', targetId: 'goblin-1', advantageMode: 'none' }
+      );
+
+      // R5: Repeat with same actionId but advantageMode='advantage' -> ConflictError
+      expect(() =>
+        cmdSvc.executeCommand(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r5-act', expectedVersion: 0 },
+          { type: 'ATTACK', attackerId: 'char-fighter-1', targetId: 'goblin-1', advantageMode: 'advantage' }
+        )
+      ).toThrow(ConflictError);
+
+      db.close();
+    });
+
+    it('R6: hidden entity attack is omitted in getGameState and redacted in getEventLog', () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const rng = new DeterministicRng([14, 3]);
+      const cmdSvc = new CommandService(db, rng);
+      const gameSvc = new GameService(db);
+
+      // Hidden entity 'goblin-ambush-1' performs an attack
+      cmdSvc.executeCommand(
+        { campaignId: POC_CAMPAIGN_ID, actionId: 'r6-ambush', expectedVersion: 0 },
+        { type: 'ATTACK', attackerId: 'goblin-ambush-1', targetId: 'char-fighter-1' }
+      );
+
+      // 1. getGameState: hidden entity is NOT in public characters list
+      const state = gameSvc.getGameState(POC_CAMPAIGN_ID);
+      expect(state.characters.find((c) => c.id === 'goblin-ambush-1')).toBeUndefined();
+
+      // 2. getEventLog: attackerId is redacted from 'goblin-ambush-1' to 'unseen-attacker'
+      const events = gameSvc.getEventLog(POC_CAMPAIGN_ID);
+      expect(events).toHaveLength(1);
+      const payload = events[0].payload as Record<string, unknown>;
+      expect(payload.attackerId).toBe('unseen-attacker');
+      expect(JSON.stringify(events)).not.toContain('goblin-ambush-1');
+
+      db.close();
+    });
+
+    it('R7: consecutive movements exceeding speed budget in turn are rejected', () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const cmdSvc = new CommandService(db);
+
+      // Fighter speed is 30ft. Starts at (2, 5).
+      // Move 1: to (6, 5) -> 4 squares = 20ft <= 30ft (succeeds)
+      cmdSvc.executeCommand(
+        { campaignId: POC_CAMPAIGN_ID, actionId: 'r7-move-1', expectedVersion: 0 },
+        { type: 'MOVE', characterId: 'char-fighter-1', toX: 6, toY: 5 }
+      );
+
+      // Move 2: to (10, 5) -> another 4 squares = 20ft -> cumulative 40ft > 30ft budget (rejected!)
+      expect(() =>
+        cmdSvc.executeCommand(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r7-move-2', expectedVersion: 1 },
+          { type: 'MOVE', characterId: 'char-fighter-1', toX: 10, toY: 5 }
+        )
+      ).toThrow(ValidationError);
+
+      db.close();
+    });
+
+    it('R8: HEAL rejects missing inventory resource, invalid formula, and mismatched pending intent', () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const cmdSvc = new CommandService(db);
+
+      // Rogue starts with 0 Potions of Healing in inventory
+      expect(() =>
+        cmdSvc.executeCommand(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r8-no-potion', expectedVersion: 0 },
+          { type: 'HEAL', targetId: 'char-rogue-1', amountFormula: '2d4+2', source: 'Potion of Healing' }
+        )
+      ).toThrow(ValidationError);
+
+      // Fighter has 1 potion, but caller requests unearned 100d100+999 formula -> ValidationError
+      expect(() =>
+        cmdSvc.executeCommand(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r8-absurd-formula', expectedVersion: 0 },
+          { type: 'HEAL', targetId: 'char-fighter-1', amountFormula: '100d100+999', source: 'Potion of Healing' }
+        )
+      ).toThrow(ValidationError);
+
+      // Pending action is for 'INVESTIGATE', resolved as 'HEAL' -> ValidationError
+      const aiSvc = new AiWorkflowService(db, cmdSvc);
+      const pending = aiSvc.submitPlayerAction(POC_CAMPAIGN_ID, 'char-fighter-1', 'Investigate door', 'INVESTIGATE');
+      expect(() =>
+        aiSvc.resolveAction(
+          { campaignId: POC_CAMPAIGN_ID, actionId: 'r8-mismatched-intent', expectedVersion: 0 },
+          { type: 'HEAL', targetId: 'char-fighter-1', amountFormula: '2d4+2', source: 'Potion of Healing' },
+          pending.id
+        )
+      ).toThrow(ValidationError);
+
+      db.close();
+    });
+
+    it('R9: proposal idempotency returns persisted DB record and rejects altered parameters', () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const svc = new AiWorkflowService(db);
+
+      const original = svc.proposeResolution({
+        campaignId: POC_CAMPAIGN_ID,
+        actionId: 'r9-prop',
+        proposedResolutionType: 'ABILITY_CHECK',
+        dc: 15,
+        parameters: { characterId: 'char-rogue-1', ability: 'dex', skill: 'Stealth' },
+        explanation: 'Stealth check DC 15',
+      });
+
+      // R9: Resubmitting same actionId with altered parameters (Fighter Perception) -> ConflictError
+      expect(() =>
+        svc.proposeResolution({
+          campaignId: POC_CAMPAIGN_ID,
+          actionId: 'r9-prop',
+          proposedResolutionType: 'ABILITY_CHECK',
+          dc: 15,
+          parameters: { characterId: 'char-fighter-1', ability: 'wis', skill: 'Perception' },
+          explanation: 'Altered explanation',
+        })
+      ).toThrow(ConflictError);
+
+      // Exact repeat returns persisted record
+      const repeat = svc.proposeResolution({
+        campaignId: POC_CAMPAIGN_ID,
+        actionId: 'r9-prop',
+        proposedResolutionType: 'ABILITY_CHECK',
+        dc: 15,
+        parameters: { characterId: 'char-rogue-1', ability: 'dex', skill: 'Stealth' },
+        explanation: 'Stealth check DC 15',
+      });
+      expect(repeat.actionId).toBe(original.actionId);
+      expect(repeat.explanation).toBe(original.explanation);
+
+      db.close();
+    });
+
+    it('R10: remote mode HTTP listener rejects cross-origin request without explicit allowedOrigins', async () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const service = new GameService(db);
+
+      const running = await startHttpServer({
+        host: '127.0.0.1',
+        port: 0,
+        remoteMode: true,
+        authToken: 'valid-secret-token',
+        allowedOrigins: undefined, // No allowed origins configured
+        gameService: service,
+      });
+
+      try {
+        // Cross-origin request with Origin header in remote mode -> 403
+        const res = await fetch(`http://127.0.0.1:${running.port}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer valid-secret-token',
+            Origin: 'https://untrusted-browser.com',
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+        });
+        expect(res.status).toBe(403);
+      } finally {
+        await running.close();
+        db.close();
+      }
+    });
+
+    it('R11: streamed / chunked HTTP request exceeding body limit returns 413', async () => {
+      const db = initDatabase({ dbPath: ':memory:' });
+      const service = new GameService(db);
+
+      const running = await startHttpServer({
+        host: '127.0.0.1',
+        port: 0,
+        maxRequestBodyBytes: 50, // 50 bytes limit
+        authToken: 'test-token',
+        gameService: service,
+      });
+
+      try {
+        // Send body > 50 bytes without Content-Length (using chunked stream)
+        const chunk1 = 'a'.repeat(30);
+        const chunk2 = 'b'.repeat(30);
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(chunk1));
+            controller.enqueue(new TextEncoder().encode(chunk2));
+            controller.close();
+          },
+        });
+
+        const res = await fetch(`http://127.0.0.1:${running.port}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer test-token',
+          },
+          body: stream,
+          duplex: 'half',
+        } as RequestInit);
+
+        expect(res.status).toBe(413);
+        const json = (await res.json()) as { error: string };
+        expect(json.error).toContain('Payload Too Large');
+      } finally {
+        await running.close();
+        db.close();
+      }
     });
   });
 });

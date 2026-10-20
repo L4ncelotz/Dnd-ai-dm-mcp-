@@ -1,3 +1,4 @@
+import { projectEventForPublic } from '../domain/projection.js';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import {
@@ -279,16 +280,25 @@ export class GameService {
       `)
       .all(campaignId, boundedLimit) as unknown as GameEventRow[];
 
-    // Return in chronological ascending order
+    // P0-01: Load hidden character IDs to redact from public event log
+    const hiddenRows = this.db
+      .prepare("SELECT id FROM characters WHERE campaign_id = ? AND visibility = 'hidden'")
+      .all(campaignId) as unknown as Array<{ id: string }>;
+    const hiddenIds = new Set(hiddenRows.map((h) => h.id));
+
+    // Return in chronological ascending order with hidden entity redaction
     rows.reverse();
-    return rows.map((r) => ({
-      id: r.id,
-      campaignId: r.campaign_id,
-      actionId: r.action_id,
-      type: r.type,
-      payload: JSON.parse(r.payload_json),
-      stateVersion: r.state_version,
-      createdAt: r.created_at,
-    }));
+    return rows.map((r) => {
+      const rawEvent: GameEvent = {
+        id: r.id,
+        campaignId: r.campaign_id,
+        actionId: r.action_id,
+        type: r.type,
+        payload: JSON.parse(r.payload_json),
+        stateVersion: r.state_version,
+        createdAt: r.created_at,
+      };
+      return projectEventForPublic(rawEvent, hiddenIds);
+    });
   }
 }

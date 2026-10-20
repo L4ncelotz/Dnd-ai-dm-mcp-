@@ -272,7 +272,7 @@ export function createDndMcpServer(options: CreateMcpServerOptions): McpServer {
         campaignId: z.string().min(1).describe("The campaign ID, e.g. 'poc-campaign'"),
         actionId: z.string().min(1).describe('Unique idempotency key for this action'),
         expectedVersion: z.number().int().min(0).describe('Expected campaign state version'),
-        proposalId: z.string().optional().describe('ID of the locked proposal establishing the DC and mechanics'),
+        proposalId: z.string().min(1).describe('ID of the locked proposal establishing the DC and mechanics'),
         pendingActionId: z.string().optional().describe('ID of the pending player action being resolved'),
         characterId: z.string().min(1).describe('ID of the character making the check'),
         ability: z.enum(['str', 'dex', 'con', 'int', 'wis', 'cha']).describe('Ability score used'),

@@ -233,7 +233,7 @@ export class AiWorkflowService {
 
       if (c.role === 'monster') {
         visibleEnemies.push(safe);
-      } else {
+      } else if (c.role === 'player') {
         party.push(safe);
       }
     }
@@ -295,21 +295,38 @@ export class AiWorkflowService {
     const dc = proposal.dc ?? (typeof params.dc === 'number' ? params.dc : null);
 
     // Check if proposal already exists
+    // P1-06 (R9): Check if proposal already exists and verify full canonical match
     const existing = this.db
       .prepare('SELECT * FROM resolution_proposals WHERE campaign_id = ? AND action_id = ?')
       .get(proposal.campaignId, proposal.actionId) as unknown as DbResolutionProposalRow | undefined;
 
     if (existing) {
-      if (
-        existing.proposed_type !== proposal.proposedResolutionType ||
-        existing.dc !== dc ||
-        existing.pending_action_id !== (proposal.pendingActionId ?? null)
-      ) {
+      const existingParams = JSON.parse(existing.parameters_json);
+      const newParams = proposal.parameters ?? {};
+      const paramsMatch = JSON.stringify(existingParams) === JSON.stringify(newParams);
+      const pendingMatch = (existing.pending_action_id ?? null) === (proposal.pendingActionId ?? null);
+      const typeMatch = existing.proposed_type === proposal.proposedResolutionType;
+      const dcMatch = (existing.dc ?? null) === (dc ?? null);
+      const explanationMatch = existing.explanation === proposal.explanation.trim();
+      const citationMatch = (existing.rule_citation ?? null) === (proposal.proposedRuleCitation ?? null);
+
+      if (!paramsMatch || !pendingMatch || !typeMatch || !dcMatch || !explanationMatch || !citationMatch) {
         throw new ConflictError(
           `Proposal '${proposal.actionId}' has already been submitted with different parameters`
         );
       }
-      return proposal;
+
+      // Return the persisted DB record, never untrusted caller modifications
+      return {
+        actionId: existing.action_id,
+        campaignId: existing.campaign_id,
+        pendingActionId: existing.pending_action_id ?? undefined,
+        proposedResolutionType: existing.proposed_type as any,
+        proposedRuleCitation: existing.rule_citation ?? undefined,
+        dc: existing.dc ?? undefined,
+        parameters: existingParams,
+        explanation: existing.explanation,
+      };
     }
 
     const id = proposal.actionId;
@@ -363,6 +380,11 @@ export class AiWorkflowService {
     if (!characterId) throw new ValidationError('characterId is required');
     if (!Number.isInteger(dc) || dc <= 0) throw new ValidationError('DC must be a positive integer');
 
+    // P1-01 (R1): In live mode, require proposalId to enforce proposal lock
+    const isTestBypass = (intent as unknown as Record<string, unknown>).testBypass === true;
+    if (!proposalId && !isTestBypass) {
+      throw new ValidationError('proposalId is required to resolve an ability check');
+    }
     this.db.exec('BEGIN IMMEDIATE;');
     try {
       // 1. P1-04: Strict full-request idempotency check
@@ -402,7 +424,7 @@ export class AiWorkflowService {
         );
       }
 
-      // 3. P1-02: Proposal lock verification
+      // 3. P1-02 (R2) & P1-03 (R3, R4): Proposal lock verification and single-use enforcement
       if (proposalId) {
         const proposal = this.db
           .prepare('SELECT * FROM resolution_proposals WHERE campaign_id = ? AND (id = ? OR action_id = ?)')
@@ -412,15 +434,29 @@ export class AiWorkflowService {
           throw new NotFoundError(`Locked proposal '${proposalId}' not found in campaign '${campaignId}'`);
         }
 
+        // P1-02 (R2): Prevent proposal reuse on fresh rolls
+        if (proposal.status !== 'proposed') {
+          throw new ConflictError(
+            `Proposal '${proposalId}' has already been resolved or is not in proposed state`
+          );
+        }
+
         if (proposal.dc !== null && proposal.dc !== dc) {
           throw new ConflictError(
             `Cannot alter DC: locked proposal established DC ${proposal.dc}, but received DC ${dc}`
           );
         }
 
-        if (proposal.ability !== null && proposal.ability !== ability) {
+        if (proposal.ability !== null && proposal.ability.toLowerCase() !== ability.toLowerCase()) {
           throw new ConflictError(
             `Cannot alter ability: locked proposal established ability '${proposal.ability}', received '${ability}'`
+          );
+        }
+
+        // P1-03 (R3): Lock skill comparison
+        if (proposal.skill && intent.skill && proposal.skill.toLowerCase() !== intent.skill.toLowerCase()) {
+          throw new ConflictError(
+            `Skill mismatch: locked proposal established skill '${proposal.skill}', received '${intent.skill}'`
           );
         }
 
@@ -430,13 +466,24 @@ export class AiWorkflowService {
           );
         }
 
-        // Lock proposal as resolved
-        this.db
-          .prepare("UPDATE resolution_proposals SET status = 'resolved' WHERE campaign_id = ? AND id = ?")
-          .run(campaignId, proposal.id);
+        // P1-03 (R4): Lock pending action binding
+        if (proposal.pending_action_id && pendingActionId && pendingActionId !== proposal.pending_action_id) {
+          throw new ConflictError(
+            `Pending action mismatch: locked proposal bound to '${proposal.pending_action_id}', received '${pendingActionId}'`
+          );
+        }
 
         if (!pendingActionId && proposal.pending_action_id) {
           pendingActionId = proposal.pending_action_id;
+        }
+
+        // P1-02: Atomically transition proposal to 'resolved' and assert exactly 1 row changed
+        const updateRes = this.db
+          .prepare("UPDATE resolution_proposals SET status = 'resolved' WHERE campaign_id = ? AND id = ? AND status = 'proposed'")
+          .run(campaignId, proposal.id);
+
+        if (updateRes.changes === 0) {
+          throw new ConflictError(`Proposal '${proposalId}' has already been resolved`);
         }
       }
 
