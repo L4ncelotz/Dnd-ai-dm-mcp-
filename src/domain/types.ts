@@ -8,6 +8,8 @@ export interface Character {
   id: string;
   campaignId: string;
   name: string;
+  role?: 'player' | 'npc' | 'monster';
+  visibility?: 'public' | 'hidden';
   hp: number;
   maxHp: number;
   armorClass: number;
@@ -66,6 +68,7 @@ export interface GameEvent<TPayload = unknown> {
 export interface SafeCharacterState {
   id: string;
   name: string;
+  role?: 'player' | 'npc' | 'monster';
   hp: number;
   maxHp: number;
   armorClass: number;

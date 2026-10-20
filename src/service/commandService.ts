@@ -145,18 +145,21 @@ interface DbCharacterRow {
   name_th: string | null;
   class_name: string | null;
   class_name_th: string | null;
+  role: string | null;
+  visibility: string | null;
   level: number;
   hp: number;
   max_hp: number;
   armor_class: number;
   speed: number;
+  proficiency_bonus: number | null;
   abilities_json: string | null;
+  proficiencies_json: string | null;
   attacks_json: string | null;
   inventory_json: string | null;
   pos_x: number;
   pos_y: number;
 }
-
 interface DbCampaignRow {
   id: string;
   state_version: number;
@@ -201,7 +204,7 @@ export class CommandService {
    * Executes a validated game command transactionally with state version checking,
    * idempotency key enforcement, and durable event append.
    */
-  executeCommand(context: CommandContext, command: ActionCommand): CommandExecutionResult {
+  executeCommand(context: CommandContext, command: ActionCommand, pendingActionId?: string): CommandExecutionResult {
     const { campaignId, actionId, expectedVersion } = context;
 
     if (!campaignId) throw new ValidationError('campaignId is required');
@@ -221,13 +224,12 @@ export class CommandService {
         this.db.exec('COMMIT;');
         const recordedResult = JSON.parse(existingEvent.payload_json) as CommandExecutionResult;
 
-        // Verify command type and inputs match
-        if (existingEvent.type !== command.type) {
+        // P1-04: Strict full-request idempotency validation
+        if (existingEvent.type !== command.type || !this.isMatchingCommand(command, recordedResult)) {
           throw new ConflictError(
-            `Action '${actionId}' was already executed with different command type '${existingEvent.type}'`
+            `Action '${actionId}' has already been executed with different parameters`
           );
         }
-
         return {
           ...recordedResult,
           isDuplicate: true,
@@ -247,6 +249,11 @@ export class CommandService {
         throw new VersionConflictError(
           `Stale state version: expected ${expectedVersion}, but campaign is at version ${campaign.state_version}`
         );
+      }
+      // P1-03: Validate and consume pending action atomically in the same transaction
+      if (pendingActionId) {
+        const actorId = 'attackerId' in command ? command.attackerId : 'characterId' in command ? command.characterId : undefined;
+        this.validateAndConsumePendingAction(campaignId, pendingActionId, actorId);
       }
 
       // 3. Dispatch and execute specific command logic
@@ -366,14 +373,16 @@ export class CommandService {
       let formulaToRoll = weapon.damageFormula;
       if (isCriticalHit) {
         // Critical hit doubles dice count (e.g. 1d8+3 -> 2d8+3, 2d6+2 -> 4d6+2)
-        formulaToRoll = formulaToRoll.replace(/(\d*)d(\d+)/i, (_, countStr, sides) => {
+        // P2-02: Critical hit doubles all dice terms (global regex /g)
+        formulaToRoll = formulaToRoll.replace(/(\d*)d(\d+)/gi, (_, countStr, sides) => {
           const count = countStr ? parseInt(countStr, 10) : 1;
           return `${count * 2}d${sides}`;
         });
       }
 
       damageRoll = DiceParser.roll(formulaToRoll, this.rng);
-      totalDamage = Math.max(1, damageRoll.total);
+      // P2-03: Minimum attack damage uses non-negative floor of 0
+      totalDamage = Math.max(0, damageRoll.total);
     }
 
     const previousHp = target.hp;
@@ -496,10 +505,15 @@ export class CommandService {
     if (!Number.isInteger(toX) || !Number.isInteger(toY)) {
       throw new ValidationError('Grid coordinates must be integers');
     }
-
     const char = this.getCharacterSheet(campaignId, characterId);
     const previousPosition = { ...char.position };
     const newPosition = { x: toX, y: toY };
+
+    // P1-06: Constrain movement speed
+    const distance = Math.hypot(toX - char.position.x, toY - char.position.y) * 5;
+    if (distance > char.speed) {
+      throw new ValidationError(`Movement distance of ${Math.round(distance)}ft exceeds speed of ${char.speed}ft`);
+    }
 
     this.db
       .prepare('UPDATE characters SET pos_x = ?, pos_y = ? WHERE campaign_id = ? AND id = ?')
@@ -582,6 +596,10 @@ export class CommandService {
       ? JSON.parse(row.abilities_json)
       : { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 };
 
+    const proficiencies = row.proficiencies_json
+      ? JSON.parse(row.proficiencies_json)
+      : { skills: [], expertise: [], savingThrows: [] };
+
     const attacks = row.attacks_json ? JSON.parse(row.attacks_json) : [];
     const inventory = row.inventory_json ? JSON.parse(row.inventory_json) : [];
 
@@ -592,15 +610,68 @@ export class CommandService {
       nameTh: row.name_th ?? row.name,
       className: row.class_name ?? 'Fighter',
       classNameTh: row.class_name_th ?? 'นักรบ',
+      role: (row.role as 'player' | 'npc' | 'monster') ?? 'player',
+      visibility: (row.visibility as 'public' | 'hidden') ?? 'public',
       level: row.level,
       hp: row.hp,
       maxHp: row.max_hp,
       armorClass: row.armor_class,
       speed: row.speed,
+      proficiencyBonus: row.proficiency_bonus ?? 2,
       abilities,
+      proficiencies,
       attacks,
       inventory,
       position: { x: row.pos_x, y: row.pos_y },
     };
+  }
+
+  private validateAndConsumePendingAction(campaignId: string, pendingActionId: string, actorId?: string): void {
+    const pendingRow = this.db
+      .prepare('SELECT id, character_id, status FROM pending_actions WHERE campaign_id = ? AND id = ?')
+      .get(campaignId, pendingActionId) as { id: string; character_id: string; status: string } | undefined;
+
+    if (!pendingRow) {
+      throw new NotFoundError(`Pending action '${pendingActionId}' not found in campaign '${campaignId}'`);
+    }
+    if (pendingRow.status !== 'pending') {
+      throw new ConflictError(`Pending action '${pendingActionId}' is already '${pendingRow.status}'`);
+    }
+    if (actorId && pendingRow.character_id !== actorId) {
+      throw new ValidationError(`Pending action was created by '${pendingRow.character_id}', not '${actorId}'`);
+    }
+
+    this.db
+      .prepare("UPDATE pending_actions SET status = 'resolved' WHERE campaign_id = ? AND id = ? AND status = 'pending'")
+      .run(campaignId, pendingActionId);
+  }
+
+  private isMatchingCommand(cmd: ActionCommand, result: unknown): boolean {
+    if (!result || typeof result !== 'object') return false;
+    const res = result as Record<string, unknown>;
+
+    switch (cmd.type) {
+      case 'ATTACK': {
+        const weapon = res.weapon as { id: string } | undefined;
+        const weaponMatches = !cmd.weaponId || weapon?.id === cmd.weaponId;
+        return res.attackerId === cmd.attackerId && res.targetId === cmd.targetId && weaponMatches;
+      }
+      case 'HEAL': {
+        const healRoll = res.healRoll as { expression: string } | undefined;
+        return res.targetId === cmd.targetId && healRoll?.expression === cmd.amountFormula && res.source === cmd.source;
+      }
+      case 'APPLY_DAMAGE': {
+        const dmgRoll = res.damageRoll as { expression: string } | undefined;
+        return res.targetId === cmd.targetId && dmgRoll?.expression === cmd.amountFormula && res.damageType === cmd.damageType && res.source === cmd.source;
+      }
+      case 'MOVE': {
+        const newPos = res.newPosition as Position2D | undefined;
+        return res.characterId === cmd.characterId && newPos?.x === cmd.toX && newPos?.y === cmd.toY;
+      }
+      case 'REST':
+        return res.characterId === cmd.characterId && res.restType === cmd.restType;
+      default:
+        return false;
+    }
   }
 }

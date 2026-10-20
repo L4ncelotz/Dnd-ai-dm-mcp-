@@ -200,19 +200,32 @@ describe('CommandService Generalized Actions & Event Sourcing (Phase 01)', () =>
       {
         type: 'MOVE',
         characterId: 'char-fighter-1',
-        toX: 7,
-        toY: 10,
+        toX: 6,
+        toY: 8,
       }
     );
 
     expect(moveResult.stateVersion).toBe(1);
     if ('newPosition' in moveResult) {
       expect(moveResult.previousPosition).toEqual({ x: 2, y: 5 });
-      expect(moveResult.newPosition).toEqual({ x: 7, y: 10 });
+      expect(moveResult.newPosition).toEqual({ x: 6, y: 8 });
     }
 
     const fighter = service.getCharacterSheet(POC_CAMPAIGN_ID, 'char-fighter-1');
-    expect(fighter.position).toEqual({ x: 7, y: 10 });
+    expect(fighter.position).toEqual({ x: 6, y: 8 });
+
+    // P1-06: Moving beyond 30ft speed throws ValidationError
+    expect(() =>
+      service.executeCommand(
+        { campaignId: POC_CAMPAIGN_ID, actionId: 'cmd-move-teleport', expectedVersion: 1 },
+        {
+          type: 'MOVE',
+          characterId: 'char-fighter-1',
+          toX: 20,
+          toY: 30,
+        }
+      )
+    ).toThrow(ValidationError);
 
     db.close();
   });
@@ -377,11 +390,11 @@ describe('CommandService Generalized Actions & Event Sourcing (Phase 01)', () =>
     // Continue action on reopened DB
     service2.executeCommand(
       { campaignId: POC_CAMPAIGN_ID, actionId: 'disk-2', expectedVersion: 1 },
-      { type: 'MOVE', characterId: 'char-fighter-1', toX: 8, toY: 8 }
+      { type: 'MOVE', characterId: 'char-fighter-1', toX: 6, toY: 7 }
     );
 
     const fighter = service2.getCharacterSheet(POC_CAMPAIGN_ID, 'char-fighter-1');
-    expect(fighter.position).toEqual({ x: 8, y: 8 });
+    expect(fighter.position).toEqual({ x: 6, y: 7 });
 
     db2.close();
   });

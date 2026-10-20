@@ -35,6 +35,12 @@ export interface Position2D {
   y: number;
 }
 
+export interface CharacterProficiencies {
+  skills: string[];
+  expertise: string[];
+  savingThrows: string[];
+}
+
 export interface CharacterSheet {
   id: string;
   campaignId: string;
@@ -42,12 +48,16 @@ export interface CharacterSheet {
   nameTh: string;
   className: string;
   classNameTh: string;
+  role: 'player' | 'npc' | 'monster';
+  visibility: 'public' | 'hidden';
   level: number;
   hp: number;
   maxHp: number;
   armorClass: number;
   speed: number;
+  proficiencyBonus: number;
   abilities: AbilityScores;
+  proficiencies: CharacterProficiencies;
   attacks: WeaponAttack[];
   inventory: InventoryItem[];
   position: Position2D;
@@ -64,12 +74,20 @@ export const PREMADE_CHARACTERS: ReadonlyArray<Omit<CharacterSheet, 'campaignId'
     nameTh: 'คาเลน สตอร์มบอร์น',
     className: 'Fighter',
     classNameTh: 'นักรบ',
+    role: 'player',
+    visibility: 'public',
     level: 1,
     hp: 12,
     maxHp: 12,
     armorClass: 18, // Chain Mail (16) + Shield (+2)
     speed: 30,
+    proficiencyBonus: 2,
     abilities: { str: 16, dex: 12, con: 15, int: 10, wis: 13, cha: 8 },
+    proficiencies: {
+      skills: ['Athletics', 'Perception'],
+      expertise: [],
+      savingThrows: ['str', 'con'],
+    },
     attacks: [
       {
         id: 'longsword',
@@ -105,12 +123,20 @@ export const PREMADE_CHARACTERS: ReadonlyArray<Omit<CharacterSheet, 'campaignId'
     nameTh: 'ไลรา ดอว์นซีคเกอร์',
     className: 'Cleric',
     classNameTh: 'นักบวช',
+    role: 'player',
+    visibility: 'public',
     level: 1,
     hp: 10,
     maxHp: 10,
     armorClass: 18, // Scale Mail (14) + DEX (+2) + Shield (+2)
     speed: 30,
+    proficiencyBonus: 2,
     abilities: { str: 14, dex: 14, con: 14, int: 10, wis: 16, cha: 12 },
+    proficiencies: {
+      skills: ['Insight', 'Religion'],
+      expertise: [],
+      savingThrows: ['wis', 'cha'],
+    },
     attacks: [
       {
         id: 'mace',
@@ -136,12 +162,20 @@ export const PREMADE_CHARACTERS: ReadonlyArray<Omit<CharacterSheet, 'campaignId'
     nameTh: 'วาเอล วิสเปอร์วินด์',
     className: 'Rogue',
     classNameTh: 'จอมโจร',
+    role: 'player',
+    visibility: 'public',
     level: 1,
     hp: 9,
     maxHp: 9,
     armorClass: 14, // Leather (11) + DEX (+3)
     speed: 30,
+    proficiencyBonus: 2,
     abilities: { str: 10, dex: 16, con: 12, int: 13, wis: 12, cha: 14 },
+    proficiencies: {
+      skills: ['Stealth', 'Sleight of Hand', 'Acrobatics'],
+      expertise: ['Stealth'],
+      savingThrows: ['dex', 'int'],
+    },
     attacks: [
       {
         id: 'shortsword',

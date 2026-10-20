@@ -9,6 +9,7 @@ interface CliOptions {
   port: number;
   host: string;
   dbPath: string;
+  remote: boolean;
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -16,6 +17,7 @@ function parseArgs(args: string[]): CliOptions {
   let port = 3000;
   let host = '127.0.0.1';
   let dbPath = 'data/poc.db';
+  let remote = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -29,10 +31,12 @@ function parseArgs(args: string[]): CliOptions {
       host = args[++i];
     } else if (arg === '--db' && i + 1 < args.length) {
       dbPath = args[++i];
+    } else if (arg === '--remote') {
+      remote = true;
     }
   }
 
-  return { mode, port, host, dbPath };
+  return { mode, port, host, dbPath, remote };
 }
 
 async function main(): Promise<void> {
@@ -46,6 +50,7 @@ async function main(): Promise<void> {
     const httpRunning = await startHttpServer({
       host: options.host,
       port: options.port,
+      remoteMode: options.remote,
       gameService,
     });
 

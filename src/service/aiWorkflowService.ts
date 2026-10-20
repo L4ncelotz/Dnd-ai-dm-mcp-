@@ -60,6 +60,23 @@ interface DbCampaignRow {
   created_at: string;
 }
 
+interface DbResolutionProposalRow {
+  id: string;
+  campaign_id: string;
+  action_id: string;
+  pending_action_id: string | null;
+  proposed_type: string;
+  rule_citation: string | null;
+  dc: number | null;
+  character_id: string | null;
+  ability: string | null;
+  skill: string | null;
+  parameters_json: string;
+  explanation: string;
+  status: string;
+  created_at: string;
+}
+
 export class AiWorkflowService {
   private readonly db: DatabaseSync;
   private readonly commandService: CommandService;
@@ -138,19 +155,31 @@ export class AiWorkflowService {
    * Marks a pending action as resolved.
    */
   consumePendingAction(campaignId: string, pendingActionId: string): void {
-    this.db
+    const res = this.db
       .prepare(`
         UPDATE pending_actions
         SET status = 'resolved'
-        WHERE campaign_id = ? AND id = ?
+        WHERE campaign_id = ? AND id = ? AND status = 'pending'
       `)
       .run(campaignId, pendingActionId);
+
+    if (res.changes === 0) {
+      const exists = this.db
+        .prepare('SELECT id, status FROM pending_actions WHERE campaign_id = ? AND id = ?')
+        .get(campaignId, pendingActionId) as { status: string } | undefined;
+
+      if (!exists) {
+        throw new NotFoundError(`Pending action '${pendingActionId}' not found in campaign '${campaignId}'`);
+      }
+      throw new ConflictError(`Pending action '${pendingActionId}' is already '${exists.status}'`);
+    }
   }
 
   /**
    * Returns sanitized game context for the AI narrator.
-   * CRITICAL SECURITY INVARIANT: Concealed traps, hidden monsters, and secret plot triggers
-   * are strictly filtered out and never returned across this interface.
+   * P1-05 SECURITY INVARIANT: Concealed traps, hidden monsters (visibility='hidden'),
+   * and secret plot triggers are strictly filtered out and never returned across this interface.
+   * Partitioning relies on explicit typed role ('player' vs 'monster'), NOT id-prefix heuristics.
    */
   getGameContext(campaignId: string): GameContext {
     if (!campaignId) throw new ValidationError('campaignId is required');
@@ -163,10 +192,10 @@ export class AiWorkflowService {
       throw new NotFoundError(`Campaign '${campaignId}' not found`);
     }
 
-    // 1. Load scene
+    // 1. Load scene (revealed clues only; secret_traps_json & secret_enemies_json are omitted)
     const sceneRow = this.db
-      .prepare('SELECT * FROM scenes WHERE campaign_id = ?')
-      .get(campaignId) as unknown as DbSceneRow | undefined;
+      .prepare('SELECT location, location_th, description, description_th, revealed_clues_json FROM scenes WHERE campaign_id = ?')
+      .get(campaignId) as unknown as Omit<DbSceneRow, 'secret_traps_json' | 'secret_enemies_json'> | undefined;
 
     const scene = sceneRow
       ? {
@@ -184,11 +213,10 @@ export class AiWorkflowService {
           revealedClues: [],
         };
 
-    // 2. Load party and visible enemies
-    // Party characters are heroes/players
+    // 2. Load public characters only (P1-05: hidden monsters with visibility='hidden' are excluded)
     const characters = this.db
-      .prepare('SELECT id, name, hp, max_hp, armor_class FROM characters WHERE campaign_id = ?')
-      .all(campaignId) as unknown as Array<{ id: string; name: string; hp: number; max_hp: number; armor_class: number }>;
+      .prepare("SELECT id, name, role, hp, max_hp, armor_class FROM characters WHERE campaign_id = ? AND visibility = 'public'")
+      .all(campaignId) as unknown as Array<{ id: string; name: string; role: string; hp: number; max_hp: number; armor_class: number }>;
 
     const party: SafeCharacterState[] = [];
     const visibleEnemies: SafeCharacterState[] = [];
@@ -197,12 +225,13 @@ export class AiWorkflowService {
       const safe: SafeCharacterState = {
         id: c.id,
         name: c.name,
+        role: c.role as 'player' | 'npc' | 'monster',
         hp: c.hp,
         maxHp: c.max_hp,
         armorClass: c.armor_class,
       };
 
-      if (c.id.startsWith('goblin') || c.id.startsWith('monster')) {
+      if (c.role === 'monster') {
         visibleEnemies.push(safe);
       } else {
         party.push(safe);
@@ -247,10 +276,85 @@ export class AiWorkflowService {
   }
 
   /**
-   * Resolves an open-ended ability check (e.g. Perception, Athletics, Stealth) server-side.
-   * Calculates genuine d20 roll + ability modifier vs DC and records event.
+   * P1-02: Persists an immutable resolution proposal (DC, check type, actor, pending action)
+   * in SQLite before dice are rolled, preventing post-hoc DC tampering.
    */
-  resolveAbilityCheck(context: CommandContext, intent: AbilityCheckIntent): AbilityCheckResult {
+  proposeResolution(proposal: ResolutionProposal): ResolutionProposal {
+    if (!proposal.campaignId) throw new ValidationError('campaignId is required');
+    if (!proposal.actionId) throw new ValidationError('actionId is required');
+    if (!proposal.proposedResolutionType) throw new ValidationError('proposedResolutionType is required');
+    if (!proposal.explanation || !proposal.explanation.trim()) {
+      throw new ValidationError('explanation is required for resolution proposal');
+    }
+
+    // Extract optional characterId, ability, skill from parameters
+    const params = proposal.parameters ?? {};
+    const characterId = typeof params.characterId === 'string' ? params.characterId : null;
+    const ability = typeof params.ability === 'string' ? params.ability : null;
+    const skill = typeof params.skill === 'string' ? params.skill : null;
+    const dc = proposal.dc ?? (typeof params.dc === 'number' ? params.dc : null);
+
+    // Check if proposal already exists
+    const existing = this.db
+      .prepare('SELECT * FROM resolution_proposals WHERE campaign_id = ? AND action_id = ?')
+      .get(proposal.campaignId, proposal.actionId) as unknown as DbResolutionProposalRow | undefined;
+
+    if (existing) {
+      if (
+        existing.proposed_type !== proposal.proposedResolutionType ||
+        existing.dc !== dc ||
+        existing.pending_action_id !== (proposal.pendingActionId ?? null)
+      ) {
+        throw new ConflictError(
+          `Proposal '${proposal.actionId}' has already been submitted with different parameters`
+        );
+      }
+      return proposal;
+    }
+
+    const id = proposal.actionId;
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(`
+        INSERT INTO resolution_proposals (
+          id, campaign_id, action_id, pending_action_id, proposed_type, rule_citation,
+          dc, character_id, ability, skill, parameters_json, explanation, status, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+      `)
+      .run(
+        id,
+        proposal.campaignId,
+        proposal.actionId,
+        proposal.pendingActionId ?? null,
+        proposal.proposedResolutionType,
+        proposal.proposedRuleCitation ?? null,
+        dc,
+        characterId,
+        ability,
+        skill,
+        JSON.stringify(proposal.parameters),
+        proposal.explanation.trim(),
+        now
+      );
+
+    return proposal;
+  }
+
+  /**
+   * Resolves an ability check server-side.
+   * P1-02: Verifies and locks against precommitted proposal if provided (rejecting DC/actor tampering).
+   * P1-03: Atomically consumes linked pending action in the same transaction.
+   * P1-04: Strict full-request idempotency check.
+   * P2-01: Applies skill proficiency (+2) and expertise (+4) from character sheet.
+   */
+  resolveAbilityCheck(
+    context: CommandContext,
+    intent: AbilityCheckIntent,
+    proposalId?: string,
+    pendingActionId?: string
+  ): AbilityCheckResult {
     const { campaignId, actionId, expectedVersion } = context;
     const { characterId, ability, dc, skill, reason, advantageMode = 'none' } = intent;
 
@@ -261,14 +365,28 @@ export class AiWorkflowService {
 
     this.db.exec('BEGIN IMMEDIATE;');
     try {
-      // 1. Idempotency check
+      // 1. P1-04: Strict full-request idempotency check
       const existingEvent = this.db
         .prepare('SELECT * FROM game_events WHERE campaign_id = ? AND action_id = ?')
         .get(campaignId, actionId) as unknown as { payload_json: string } | undefined;
 
       if (existingEvent) {
         this.db.exec('COMMIT;');
-        const recorded = JSON.parse(existingEvent.payload_json) as AbilityCheckResult;
+        const recorded = JSON.parse(existingEvent.payload_json) as AbilityCheckResult & { advantageMode?: string };
+
+        if (
+          recorded.characterId !== characterId ||
+          recorded.ability !== ability ||
+          recorded.dc !== dc ||
+          (recorded.skill ?? undefined) !== (skill ?? undefined) ||
+          recorded.reason !== reason ||
+          (recorded.advantageMode ?? 'none') !== advantageMode
+        ) {
+          throw new ConflictError(
+            `Action '${actionId}' has already been executed with different parameters`
+          );
+        }
+
         return { ...recorded, isDuplicate: true };
       }
 
@@ -284,14 +402,90 @@ export class AiWorkflowService {
         );
       }
 
-      // 3. Load character abilities
+      // 3. P1-02: Proposal lock verification
+      if (proposalId) {
+        const proposal = this.db
+          .prepare('SELECT * FROM resolution_proposals WHERE campaign_id = ? AND (id = ? OR action_id = ?)')
+          .get(campaignId, proposalId, proposalId) as unknown as DbResolutionProposalRow | undefined;
+
+        if (!proposal) {
+          throw new NotFoundError(`Locked proposal '${proposalId}' not found in campaign '${campaignId}'`);
+        }
+
+        if (proposal.dc !== null && proposal.dc !== dc) {
+          throw new ConflictError(
+            `Cannot alter DC: locked proposal established DC ${proposal.dc}, but received DC ${dc}`
+          );
+        }
+
+        if (proposal.ability !== null && proposal.ability !== ability) {
+          throw new ConflictError(
+            `Cannot alter ability: locked proposal established ability '${proposal.ability}', received '${ability}'`
+          );
+        }
+
+        if (proposal.character_id !== null && proposal.character_id !== characterId) {
+          throw new ConflictError(
+            `Character mismatch: locked proposal established actor '${proposal.character_id}', received '${characterId}'`
+          );
+        }
+
+        // Lock proposal as resolved
+        this.db
+          .prepare("UPDATE resolution_proposals SET status = 'resolved' WHERE campaign_id = ? AND id = ?")
+          .run(campaignId, proposal.id);
+
+        if (!pendingActionId && proposal.pending_action_id) {
+          pendingActionId = proposal.pending_action_id;
+        }
+      }
+
+      // 4. P1-03: Validate and consume pending action atomically
+      if (pendingActionId) {
+        const pendingRow = this.db
+          .prepare('SELECT id, character_id, status FROM pending_actions WHERE campaign_id = ? AND id = ?')
+          .get(campaignId, pendingActionId) as { id: string; character_id: string; status: string } | undefined;
+
+        if (!pendingRow) {
+          throw new NotFoundError(`Pending action '${pendingActionId}' not found in campaign '${campaignId}'`);
+        }
+        if (pendingRow.status !== 'pending') {
+          throw new ConflictError(`Pending action '${pendingActionId}' is already '${pendingRow.status}'`);
+        }
+        if (pendingRow.character_id !== characterId) {
+          throw new ValidationError(
+            `Pending action was created by '${pendingRow.character_id}', not '${characterId}'`
+          );
+        }
+
+        this.db
+          .prepare("UPDATE pending_actions SET status = 'resolved' WHERE campaign_id = ? AND id = ? AND status = 'pending'")
+          .run(campaignId, pendingActionId);
+      }
+
+      // 5. Load character abilities and calculate modifiers (P2-01: proficiencies & expertise)
       const charSheet = this.commandService.getCharacterSheet(campaignId, characterId);
       const score = charSheet.abilities[ability];
       if (score === undefined) {
         throw new ValidationError(`Unknown ability score '${ability}' on character '${characterId}'`);
       }
 
-      const modifier = calculateAbilityModifier(score);
+      const abilityMod = calculateAbilityModifier(score);
+      let profBonus = 0;
+
+      const skillNorm = skill ? skill.trim().toLowerCase() : undefined;
+      if (skillNorm && charSheet.proficiencies) {
+        const isExpert = charSheet.proficiencies.expertise?.some((s) => s.toLowerCase() === skillNorm);
+        const isProficient = charSheet.proficiencies.skills?.some((s) => s.toLowerCase() === skillNorm);
+
+        if (isExpert) {
+          profBonus = charSheet.proficiencyBonus * 2;
+        } else if (isProficient) {
+          profBonus = charSheet.proficiencyBonus;
+        }
+      }
+
+      const modifier = abilityMod + profBonus;
 
       // Roll d20 with advantage / disadvantage
       const rollRes = DiceParser.roll('1d20', this.rng, advantageMode);
@@ -304,7 +498,7 @@ export class AiWorkflowService {
       const isSuccess = total >= dc;
       const nextVersion = campaign.state_version + 1;
 
-      const result: AbilityCheckResult = {
+      const result: AbilityCheckResult & { advantageMode?: string } = {
         actionId,
         campaignId,
         stateVersion: nextVersion,
@@ -318,6 +512,7 @@ export class AiWorkflowService {
         total,
         isSuccess,
         reason,
+        advantageMode,
         isDuplicate: false,
       };
 
@@ -344,39 +539,21 @@ export class AiWorkflowService {
   }
 
   /**
-   * Proposes a mechanical resolution for an ambiguous player intention before execution.
-   */
-  proposeResolution(proposal: ResolutionProposal): ResolutionProposal {
-    if (!proposal.campaignId) throw new ValidationError('campaignId is required');
-    if (!proposal.actionId) throw new ValidationError('actionId is required');
-    if (!proposal.proposedResolutionType) throw new ValidationError('proposedResolutionType is required');
-    if (!proposal.explanation || !proposal.explanation.trim()) {
-      throw new ValidationError('explanation is required for resolution proposal');
-    }
-
-    return proposal;
-  }
-
-  /**
-   * Executes a game action via CommandService, consuming any linked pending action.
+   * P1-03: Executes a game action via CommandService atomically,
+   * passing pendingActionId so state transition and pending resolution commit in one transaction.
    */
   resolveAction(
     context: CommandContext,
     command: ActionCommand,
     pendingActionId?: string
   ): CommandExecutionResult {
-    const result = this.commandService.executeCommand(context, command);
-
-    if (pendingActionId) {
-      this.consumePendingAction(context.campaignId, pendingActionId);
-    }
-
-    return result;
+    return this.commandService.executeCommand(context, command, pendingActionId);
   }
 
   /**
    * Publishes an AI narrator's story text into the authorized event feed.
    * INVARIANT: Narration cannot mutate character HP, AC, inventory, or positions.
+   * P1-04: Strict full-request idempotency check.
    */
   publishNarration(
     context: CommandContext,
@@ -391,7 +568,7 @@ export class AiWorkflowService {
 
     this.db.exec('BEGIN IMMEDIATE;');
     try {
-      // 1. Idempotency check
+      // 1. P1-04: Strict full-request idempotency check
       const existingEvent = this.db
         .prepare('SELECT * FROM game_events WHERE campaign_id = ? AND action_id = ?')
         .get(campaignId, actionId) as unknown as { payload_json: string } | undefined;
@@ -399,6 +576,17 @@ export class AiWorkflowService {
       if (existingEvent) {
         this.db.exec('COMMIT;');
         const recorded = JSON.parse(existingEvent.payload_json) as NarrationPayload;
+
+        if (
+          recorded.text !== text.trim() ||
+          (recorded.textTh ?? undefined) !== (textTh?.trim() ?? undefined) ||
+          (recorded.speakerName ?? undefined) !== (speakerName?.trim() ?? undefined)
+        ) {
+          throw new ConflictError(
+            `Action '${actionId}' has already been executed with different parameters`
+          );
+        }
+
         return { ...recorded, isDuplicate: true };
       }
 

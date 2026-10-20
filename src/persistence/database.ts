@@ -44,12 +44,16 @@ export function initDatabase(config: DatabaseConfig = {}): DatabaseSync {
       name_th TEXT,
       class_name TEXT,
       class_name_th TEXT,
+      role TEXT NOT NULL DEFAULT 'player',
+      visibility TEXT NOT NULL DEFAULT 'public',
       level INTEGER NOT NULL DEFAULT 1,
       hp INTEGER NOT NULL,
       max_hp INTEGER NOT NULL,
       armor_class INTEGER NOT NULL,
       speed INTEGER NOT NULL DEFAULT 30,
+      proficiency_bonus INTEGER NOT NULL DEFAULT 2,
       abilities_json TEXT,
+      proficiencies_json TEXT,
       attacks_json TEXT,
       inventory_json TEXT,
       pos_x INTEGER NOT NULL DEFAULT 0,
@@ -68,6 +72,7 @@ export function initDatabase(config: DatabaseConfig = {}): DatabaseSync {
       FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
       CONSTRAINT uq_campaign_action UNIQUE (campaign_id, action_id)
     );
+
     CREATE INDEX IF NOT EXISTS idx_game_events_campaign_seq
       ON game_events(campaign_id, state_version);
 
@@ -93,9 +98,28 @@ export function initDatabase(config: DatabaseConfig = {}): DatabaseSync {
       secret_enemies_json TEXT NOT NULL DEFAULT '[]',
       FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS resolution_proposals (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      action_id TEXT NOT NULL,
+      pending_action_id TEXT,
+      proposed_type TEXT NOT NULL,
+      rule_citation TEXT,
+      dc INTEGER,
+      character_id TEXT,
+      ability TEXT,
+      skill TEXT,
+      parameters_json TEXT NOT NULL DEFAULT '{}',
+      explanation TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'proposed',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+      CONSTRAINT uq_proposal_campaign_action UNIQUE (campaign_id, action_id)
+    );
   `);
 
-  // Run column migrations if characters table existed previously without rich columns
+  // Run column migrations if characters table existed previously without new columns
   migrateCharactersTable(db);
 
   // Idempotent fixture seeding
@@ -119,9 +143,13 @@ function migrateCharactersTable(db: DatabaseSync): void {
     { col: 'name_th', ddl: 'ALTER TABLE characters ADD COLUMN name_th TEXT;' },
     { col: 'class_name', ddl: 'ALTER TABLE characters ADD COLUMN class_name TEXT;' },
     { col: 'class_name_th', ddl: 'ALTER TABLE characters ADD COLUMN class_name_th TEXT;' },
+    { col: 'role', ddl: "ALTER TABLE characters ADD COLUMN role TEXT NOT NULL DEFAULT 'player';" },
+    { col: 'visibility', ddl: "ALTER TABLE characters ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public';" },
     { col: 'level', ddl: 'ALTER TABLE characters ADD COLUMN level INTEGER NOT NULL DEFAULT 1;' },
     { col: 'speed', ddl: 'ALTER TABLE characters ADD COLUMN speed INTEGER NOT NULL DEFAULT 30;' },
+    { col: 'proficiency_bonus', ddl: 'ALTER TABLE characters ADD COLUMN proficiency_bonus INTEGER NOT NULL DEFAULT 2;' },
     { col: 'abilities_json', ddl: 'ALTER TABLE characters ADD COLUMN abilities_json TEXT;' },
+    { col: 'proficiencies_json', ddl: 'ALTER TABLE characters ADD COLUMN proficiencies_json TEXT;' },
     { col: 'attacks_json', ddl: 'ALTER TABLE characters ADD COLUMN attacks_json TEXT;' },
     { col: 'inventory_json', ddl: 'ALTER TABLE characters ADD COLUMN inventory_json TEXT;' },
     { col: 'pos_x', ddl: 'ALTER TABLE characters ADD COLUMN pos_x INTEGER NOT NULL DEFAULT 0;' },
@@ -148,10 +176,10 @@ function seedPocFixture(db: DatabaseSync): void {
   const insertCharacter = db.prepare(`
     INSERT OR IGNORE INTO characters (
       id, campaign_id, name, name_th, class_name, class_name_th,
-      level, hp, max_hp, armor_class, speed,
-      abilities_json, attacks_json, inventory_json, pos_x, pos_y
+      role, visibility, level, hp, max_hp, armor_class, speed, proficiency_bonus,
+      abilities_json, proficiencies_json, attacks_json, inventory_json, pos_x, pos_y
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   // Phase 00 fixture characters (kept for backward compatibility with PoC tools)
@@ -162,12 +190,16 @@ function seedPocFixture(db: DatabaseSync): void {
     'ผู้กล้า',
     'Fighter',
     'นักรบ',
+    'player',
+    'public',
     1,
     20,
     20,
     14,
     30,
+    2,
     JSON.stringify({ str: 16, dex: 12, con: 14, int: 10, wis: 12, cha: 10 }),
+    JSON.stringify({ skills: ['Athletics'], expertise: [], savingThrows: ['str', 'con'] }),
     JSON.stringify([{ id: 'longsword', name: 'Longsword', nameTh: 'ดาบยาว', attackBonus: 5, damageFormula: '1d8+3', damageType: 'slashing' }]),
     JSON.stringify([{ id: 'item-potion', name: 'Potion of Healing', nameTh: 'น้ำยาฟื้นพลังชีวิต', quantity: 1 }]),
     0,
@@ -181,16 +213,44 @@ function seedPocFixture(db: DatabaseSync): void {
     'ก็อบลิน',
     'Monster',
     'มอนสเตอร์',
+    'monster',
+    'public',
     1,
     7,
     7,
     12,
     30,
+    2,
     JSON.stringify({ str: 8, dex: 14, con: 10, int: 10, wis: 8, cha: 8 }),
+    JSON.stringify({ skills: ['Stealth'], expertise: [], savingThrows: [] }),
     JSON.stringify([{ id: 'scimitar', name: 'Scimitar', nameTh: 'ดาบโค้ง', attackBonus: 4, damageFormula: '1d6+2', damageType: 'slashing' }]),
     JSON.stringify([]),
     5,
     5
+  );
+
+  // Hidden goblin ambusher fixture (to prove P1-05: hidden entities never leak in public views)
+  insertCharacter.run(
+    'goblin-ambush-1',
+    POC_CAMPAIGN_ID,
+    'Goblin Ambusher',
+    'ก็อบลินซุ่มโจมตี',
+    'Monster',
+    'มอนสเตอร์',
+    'monster',
+    'hidden',
+    1,
+    7,
+    7,
+    15,
+    30,
+    2,
+    JSON.stringify({ str: 8, dex: 16, con: 10, int: 10, wis: 8, cha: 8 }),
+    JSON.stringify({ skills: ['Stealth'], expertise: ['Stealth'], savingThrows: [] }),
+    JSON.stringify([{ id: 'shortbow', name: 'Shortbow', nameTh: 'ธนูสั้น', attackBonus: 5, damageFormula: '1d6+3', damageType: 'piercing' }]),
+    JSON.stringify([]),
+    6,
+    6
   );
 
   // Phase 01: Three canonical premade level-1 player characters
@@ -202,12 +262,16 @@ function seedPocFixture(db: DatabaseSync): void {
       premade.nameTh,
       premade.className,
       premade.classNameTh,
+      premade.role,
+      premade.visibility,
       premade.level,
       premade.hp,
       premade.maxHp,
       premade.armorClass,
       premade.speed,
+      premade.proficiencyBonus,
       JSON.stringify(premade.abilities),
+      JSON.stringify(premade.proficiencies),
       JSON.stringify(premade.attacks),
       JSON.stringify(premade.inventory),
       premade.position.x,

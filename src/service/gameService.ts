@@ -48,6 +48,8 @@ interface CharacterRow {
   id: string;
   campaign_id: string;
   name: string;
+  role: 'player' | 'npc' | 'monster';
+  visibility: 'public' | 'hidden';
   hp: number;
   max_hp: number;
   armor_class: number;
@@ -94,10 +96,9 @@ export class GameService {
 
     const characterRows = this.db
       .prepare(
-        'SELECT id, campaign_id, name, hp, max_hp, armor_class FROM characters WHERE campaign_id = ? ORDER BY id ASC'
+        "SELECT id, campaign_id, name, role, visibility, hp, max_hp, armor_class FROM characters WHERE campaign_id = ? AND visibility = 'public' ORDER BY id ASC"
       )
       .all(campaignId) as unknown as CharacterRow[];
-
     return {
       campaignId: campaign.id,
       stateVersion: campaign.state_version,
@@ -273,11 +274,13 @@ export class GameService {
         SELECT id, campaign_id, action_id, type, payload_json, state_version, created_at
         FROM game_events
         WHERE campaign_id = ?
-        ORDER BY state_version ASC
+        ORDER BY state_version DESC
         LIMIT ?
       `)
       .all(campaignId, boundedLimit) as unknown as GameEventRow[];
 
+    // Return in chronological ascending order
+    rows.reverse();
     return rows.map((r) => ({
       id: r.id,
       campaignId: r.campaign_id,

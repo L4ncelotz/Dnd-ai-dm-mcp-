@@ -59,7 +59,7 @@ export function resolveAttack(
       damageDiceRolls.push(rng.rollDie(stats.damageDiceSides));
     }
     const diceSum = damageDiceRolls.reduce((sum, r) => sum + r, 0);
-    totalDamage = Math.max(1, diceSum + stats.damageBonus);
+    totalDamage = Math.max(0, diceSum + stats.damageBonus);
   }
 
   const previousHp = target.hp;

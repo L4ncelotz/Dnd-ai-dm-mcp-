@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import {
@@ -261,6 +262,60 @@ export function createDndMcpServer(options: CreateMcpServerOptions): McpServer {
       }
     }
   );
+  // Tool 7: resolve_ability_check (Phase 02 AI-DM - P1-01)
+  server.registerTool(
+    'resolve_ability_check',
+    {
+      description:
+        'Resolves an ability or skill check authoritatively against a DC, verifying against locked proposals and applying proficiencies.',
+      inputSchema: {
+        campaignId: z.string().min(1).describe("The campaign ID, e.g. 'poc-campaign'"),
+        actionId: z.string().min(1).describe('Unique idempotency key for this action'),
+        expectedVersion: z.number().int().min(0).describe('Expected campaign state version'),
+        proposalId: z.string().optional().describe('ID of the locked proposal establishing the DC and mechanics'),
+        pendingActionId: z.string().optional().describe('ID of the pending player action being resolved'),
+        characterId: z.string().min(1).describe('ID of the character making the check'),
+        ability: z.enum(['str', 'dex', 'con', 'int', 'wis', 'cha']).describe('Ability score used'),
+        dc: z.number().int().min(1).describe('Target difficulty class'),
+        skill: z.string().optional().describe('Specific skill proficiency applied (e.g. Stealth, Perception)'),
+        reason: z.string().min(1).describe('Reason for the check (e.g. Trap detection, Searching room)'),
+        advantageMode: z.enum(['none', 'advantage', 'disadvantage']).optional().default('none'),
+      },
+    },
+    async (args) => {
+      try {
+        const result = aiWorkflowService.resolveAbilityCheck(
+          {
+            campaignId: args.campaignId,
+            actionId: args.actionId,
+            expectedVersion: args.expectedVersion,
+          },
+          {
+            characterId: args.characterId,
+            ability: args.ability,
+            dc: args.dc,
+            skill: args.skill,
+            reason: args.reason,
+            advantageMode: args.advantageMode,
+          },
+          args.proposalId,
+          args.pendingActionId
+        );
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+        return formatMcpError(err);
+      }
+    }
+  );
+
 
   // Tool 7: resolve_action (Phase 02 AI-DM)
   server.registerTool(
@@ -402,8 +457,10 @@ function formatMcpError(err: unknown) {
     };
   }
 
-  // Never leak internal stack traces to the MCP client/model
-  const message = err instanceof Error ? err.message : String(err);
+  // Never leak internal exception details to the MCP client/model
+  const incidentId = randomUUID();
+  const rawDetails = err instanceof Error ? err.stack : String(err);
+  process.stderr.write(`[dnd-mcp] [Incident:${incidentId}] Unhandled tool error: ${rawDetails}\n`);
   return {
     isError: true,
     content: [
@@ -411,7 +468,7 @@ function formatMcpError(err: unknown) {
         type: 'text' as const,
         text: JSON.stringify({
           error: 'ServerError',
-          message: 'An internal error occurred during tool execution: ' + message,
+          message: `An unexpected internal server error occurred (Incident ID: ${incidentId}).`,
         }),
       },
     ],

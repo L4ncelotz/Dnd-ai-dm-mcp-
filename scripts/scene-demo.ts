@@ -12,8 +12,14 @@
 import { initDatabase, POC_CAMPAIGN_ID } from '../src/persistence/database.js';
 import { AiWorkflowService } from '../src/service/aiWorkflowService.js';
 import { CryptoRng } from '../src/domain/rng.js';
+import { rmSync } from 'node:fs';
 
 async function runScene(): Promise<void> {
+  try {
+    rmSync('data/scene-demo.db', { force: true });
+    rmSync('data/scene-demo.db-wal', { force: true });
+    rmSync('data/scene-demo.db-shm', { force: true });
+  } catch {}
   const db = initDatabase({ dbPath: 'data/scene-demo.db' });
   const svc = new AiWorkflowService(db, undefined, new CryptoRng());
 
@@ -36,9 +42,10 @@ async function runScene(): Promise<void> {
   console.log(`[Player] Queued intent: ${pending.intentText}`);
 
   // 3. DM proposes resolution BEFORE rolling
+  const ts = Date.now();
   const proposal = svc.proposeResolution({
     campaignId: POC_CAMPAIGN_ID,
-    actionId: 'scene-propose-1',
+    actionId: `scene-propose-${ts}`,
     pendingActionId: pending.id,
     proposedResolutionType: 'ABILITY_CHECK',
     proposedRuleCitation: 'PHB Ch.7: Dexterity (Stealth) check',
@@ -49,27 +56,28 @@ async function runScene(): Promise<void> {
   });
   console.log(`[DM] Proposed: ${proposal.explanation}\n`);
 
-  // 4. Server resolves authoritatively
+  // 4. Server resolves authoritatively, validating against locked proposal and consuming pending action atomically
   const check = svc.resolveAbilityCheck(
-    { campaignId: POC_CAMPAIGN_ID, actionId: 'scene-check-1', expectedVersion: ctx.stateVersion },
+    { campaignId: POC_CAMPAIGN_ID, actionId: `scene-check-${ts}`, expectedVersion: ctx.stateVersion },
     {
       characterId: 'char-rogue-1',
       ability: 'dex',
       dc: 12,
       skill: 'Stealth',
       reason: 'Trap detection at cave entrance',
-    }
+    },
+    proposal.actionId,
+    pending.id
   );
   console.log(
     `[Server] d20=${check.d20} + ${check.modifier} = ${check.total} vs DC ${check.dc} => ${check.isSuccess ? 'SUCCESS (สำเร็จ)' : 'FAILURE (ล้มเหลว)'}`
   );
-
   // 5. DM narrates only the returned outcome
   const narrationText = check.isSuccess
     ? 'วาเอลก้าวอย่างระมัดระวัง สายตาของเขาจับเงากับดักเชือกที่ซ่อนอยู่ท่ามกลางพุ่มหนามได้ทัน'
     : 'เสียงกรอบแกรบของใบไม้ใต้เท้าทำให้กับดักเชือกเด้งขึ้นรอบข้อเท้าของเขา';
   const narration = svc.publishNarration(
-    { campaignId: POC_CAMPAIGN_ID, actionId: 'scene-narr-1', expectedVersion: check.stateVersion },
+    { campaignId: POC_CAMPAIGN_ID, actionId: `scene-narr-${ts}`, expectedVersion: check.stateVersion },
     {
       text: check.isSuccess
         ? 'Vael steps carefully, spotting the hidden snare trap among the brambles.'
@@ -80,8 +88,7 @@ async function runScene(): Promise<void> {
   );
   console.log(`[DM Narration] ${narration.textTh}`);
 
-  // 6. Queue cleared, final state
-  svc.consumePendingAction(POC_CAMPAIGN_ID, pending.id);
+  // 6. Queue cleared atomically, final state verified
   const remaining = svc.getPendingActions(POC_CAMPAIGN_ID);
   console.log(`\n[System] Remaining pending actions: ${remaining.length}`);
   console.log(`[System] Final state version: ${svc.getGameContext(POC_CAMPAIGN_ID).stateVersion}`);

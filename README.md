@@ -1,6 +1,6 @@
 # AI Dungeon Master - MCP-first D&D Tabletop
 
-Status: **Phase 00 (MCP PoC), Phase 01 (Game Core), and Phase 02 (AI-DM Workflow) implemented and verified** (2026-10-20).
+Status: **Phase 00–02 Hardened and Verified Locally** (2026-10-20). Real cloud host integration remains blocked pending secure tunnel and host workspace entitlements.
 
 ## Mission
 
@@ -156,17 +156,17 @@ npm run db:reset
 
 ## Phase 02: AI-DM MCP Workflow
 
-### MCP tools (8 total)
+### MCP tools (9 total)
 Phase 00 tools (`get_game_state`, `resolve_test_attack`, `get_event_log`) plus:
 
 | Tool | Purpose |
 |---|---|
 | `get_game_context` | Sanitized scene + party + recent narrations. **Hidden traps/monsters are filtered server-side and never returned.** |
 | `get_pending_actions` | Queued player intentions waiting for DM resolution. |
-| `propose_resolution` | DM proposes check/DC/rule citation **before** rolling (SRD citation in `proposedRuleCitation`). |
+| `propose_resolution` | DM proposes check/DC/rule citation **before** rolling and locks proposal in SQLite. |
+| `resolve_ability_check` | Resolves ability/skill check authoritatively against locked DC, applying proficiency/expertise. |
 | `resolve_action` | Executes ATTACK/HEAL/APPLY_DAMAGE/MOVE/REST atomically; consumes linked pending action. |
 | `publish_narration` | Writes narrative fiction to the event feed; **cannot mutate HP/AC/positions** (enforced server-side). |
-
 ### One-operator continuation flow
 1. Players submit intents via `submitPlayerAction` (queue). MCP has **no push channel** — the operator tells the AI GUI to continue.
 2. DM reads `get_game_context` + `get_pending_actions`.
@@ -178,3 +178,24 @@ Phase 00 tools (`get_game_state`, `resolve_test_attack`, `get_event_log`) plus:
 ```bash
 npm run scene:demo   # Full Thai-language story scene: queue -> propose -> check -> narrate (data/scene-demo.db)
 ```
+
+---
+
+## Verification and Truthful Status Matrix
+
+| Subsystem / Capability | Verification Method | Actual Result | Status |
+|---|---|---|---|
+| **MCP SDK v2 Tool Registration** | Automated MCP client test (`tests/mcpServer.test.ts`) | 9 tools registered & callable via SDK v2 | **Verified Locally** |
+| **SQLite Persistence & WAL** | Automated unit/integration tests (`tests/gameService.test.ts`) | Idempotent seed, restart persistence pass | **Verified Locally** |
+| **SRD 5.2.1 Dice Engine** | Vitest suite (`tests/dice.test.ts`) | Advantage/disadvantage/modifiers/breakdown | **Verified Locally** |
+| **Transactional Command Service** | Vitest suite (`tests/commandService.test.ts`) | Attacks, heals, traps, moves, rests, replay | **Verified Locally** |
+| **Locked Proposals & Anti-Tampering** | Regression suite (`tests/hardeningAudit.test.ts`) | Post-proposal DC tampering rejected | **Verified Locally** |
+| **Atomic Pending Action Consumption** | Regression suite (`tests/hardeningAudit.test.ts`) | Consumed in same transaction as mutation | **Verified Locally** |
+| **Strict Request Idempotency** | Regression suite (`tests/hardeningAudit.test.ts`) | Parameter mismatches rejected with Conflict | **Verified Locally** |
+| **Spoiler-Safe Visibility** | Regression suite (`tests/hardeningAudit.test.ts`) | `visibility='hidden'` monsters & traps omitted | **Verified Locally** |
+| **HTTP Transport Security** | Regression suite (`tests/hardeningAudit.test.ts`) | Fails closed on non-loopback without token | **Verified Locally** |
+| **Redacted Error Responses** | Regression suite (`tests/hardeningAudit.test.ts`) | Opaque incident IDs, zero stack leaks | **Verified Locally** |
+| **One-Operator Scene Demo** | Standalone script (`npm run scene:demo`) | Full Thai queue -> propose -> check -> narrate | **Verified Locally** |
+| **Real Remote AI-GUI (ChatGPT/Claude)** | Remote HTTPS / custom connector test | Blocked on public HTTPS tunnel + workspace role | **BLOCKED (Documented)** |
+
+*Note: Local MCP client tests and scripts are fully verified and passing. Real cloud ChatGPT/Claude host connectivity has NOT been demonstrated and must not be claimed until an authenticated HTTPS tunnel and an entitled host account are provisioned.*
