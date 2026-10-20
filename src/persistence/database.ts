@@ -68,9 +68,31 @@ export function initDatabase(config: DatabaseConfig = {}): DatabaseSync {
       FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
       CONSTRAINT uq_campaign_action UNIQUE (campaign_id, action_id)
     );
-
     CREATE INDEX IF NOT EXISTS idx_game_events_campaign_seq
       ON game_events(campaign_id, state_version);
+
+    CREATE TABLE IF NOT EXISTS pending_actions (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      character_id TEXT NOT NULL,
+      intent_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      action_type TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS scenes (
+      campaign_id TEXT PRIMARY KEY,
+      location TEXT NOT NULL,
+      location_th TEXT NOT NULL,
+      description TEXT NOT NULL,
+      description_th TEXT NOT NULL,
+      revealed_clues_json TEXT NOT NULL DEFAULT '[]',
+      secret_traps_json TEXT NOT NULL DEFAULT '[]',
+      secret_enemies_json TEXT NOT NULL DEFAULT '[]',
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+    );
   `);
 
   // Run column migrations if characters table existed previously without rich columns
@@ -192,4 +214,28 @@ function seedPocFixture(db: DatabaseSync): void {
       premade.position.y
     );
   }
+
+  // Phase 02: Default scene fixture with revealed vs server-held secret data
+  const insertScene = db.prepare(`
+    INSERT OR IGNORE INTO scenes (
+      campaign_id, location, location_th, description, description_th,
+      revealed_clues_json, secret_traps_json, secret_enemies_json
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  insertScene.run(
+    POC_CAMPAIGN_ID,
+    'Cragmaw Hideout - Entrance Cave',
+    'ถ้ำปากทางเข้าที่กบดานแคร็กมอว์',
+    'The mouth of a shallow damp cave opens before you. Brambles cover the entrance. Murmurs and the smell of campfire drift from inside.',
+    'ปากถ้ำชื้นแฉะเปิดออกตรงหน้า พุ่มหนามปกคลุมปากทาง ได้ยินเสียงพึมพำและได้กลิ่นควันไฟจากด้านใน',
+    JSON.stringify(['Footprints of goblins leading into the cave']),
+    JSON.stringify([
+      { id: 'trap-snare-1', name: 'Snare Trap', trigger: 'Brambles step', dc: 12, damage: '1d6', revealed: false },
+    ]),
+    JSON.stringify([
+      { id: 'goblin-sniper-hidden', name: 'Hidden Goblin Archer', stealthRoll: 16, revealed: false },
+    ])
+  );
 }

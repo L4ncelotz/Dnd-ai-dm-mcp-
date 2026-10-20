@@ -2,6 +2,8 @@
 
 This is behavioral guidance for an eventual connected AI GUI, **not an automatic integration**.
 
+> **Phase 02 status:** The MCP server now exposes `get_game_context`, `get_pending_actions`, `propose_resolution`, `resolve_action` and `publish_narration`. The flow below is executable end-to-end (`npm run scene:demo`); remaining gaps: real AI-GUI host connection (blocked on HTTPS/tunnel + host entitlement) and the shared web room (Phase 03).
+
 ## Three-player session
 
 - All three users are player characters. The chat operator does not know campaign spoilers or make DM rulings.

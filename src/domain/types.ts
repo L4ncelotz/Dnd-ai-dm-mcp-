@@ -84,3 +84,81 @@ export interface AttackIntent {
   attackerId: string;
   targetId: string;
 }
+
+export interface PendingAction {
+  id: string;
+  campaignId: string;
+  characterId: string;
+  intentText: string;
+  status: 'pending' | 'resolved' | 'cancelled';
+  actionType?: string;
+  createdAt: string;
+}
+
+export interface AbilityCheckIntent {
+  characterId: string;
+  ability: 'str' | 'dex' | 'con' | 'int' | 'wis' | 'cha';
+  dc: number;
+  skill?: string;
+  reason: string;
+  advantageMode?: 'none' | 'advantage' | 'disadvantage';
+}
+
+export interface AbilityCheckResult {
+  actionId: string;
+  campaignId: string;
+  stateVersion: number;
+  characterId: string;
+  ability: string;
+  skill?: string;
+  dc: number;
+  d20: number;
+  discardedD20?: number;
+  modifier: number;
+  total: number;
+  isSuccess: boolean;
+  reason: string;
+  isDuplicate: boolean;
+}
+
+export interface GameContext {
+  campaignId: string;
+  stateVersion: number;
+  scene: {
+    location: string;
+    locationTh: string;
+    description: string;
+    descriptionTh: string;
+    revealedClues: string[];
+  };
+  party: SafeCharacterState[];
+  visibleEnemies: SafeCharacterState[];
+  recentNarrations: Array<{
+    id: string;
+    speakerName?: string;
+    text: string;
+    createdAt: string;
+  }>;
+  pendingActionCount: number;
+}
+
+export interface ResolutionProposal {
+  actionId: string;
+  campaignId: string;
+  pendingActionId?: string;
+  proposedResolutionType: 'ATTACK' | 'ABILITY_CHECK' | 'HEAL' | 'APPLY_DAMAGE' | 'MOVE' | 'REST' | 'NARRATIVE';
+  proposedRuleCitation?: string;
+  dc?: number;
+  parameters: Record<string, unknown>;
+  explanation: string;
+}
+
+export interface NarrationPayload {
+  actionId: string;
+  campaignId: string;
+  stateVersion: number;
+  text: string;
+  textTh?: string;
+  speakerName?: string;
+  isDuplicate: boolean;
+}

@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke:client": "tsx scripts/smoke-client.ts",
+    "scene:demo": "tsx scripts/scene-demo.ts",
     "db:reset": "tsx scripts/reset-db.ts"
   },
   "dependencies": {

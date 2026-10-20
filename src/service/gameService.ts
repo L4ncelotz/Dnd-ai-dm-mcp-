@@ -72,6 +72,10 @@ export class GameService {
     this.rng = rng;
   }
 
+  get database(): DatabaseSync {
+    return this.db;
+  }
+
   /**
    * Returns safe, visible game state for the given campaign.
    */

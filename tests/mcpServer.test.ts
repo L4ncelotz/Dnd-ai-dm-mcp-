@@ -26,7 +26,7 @@ describe('MCP Server v2 Integration & Tool Contracts', () => {
     return { server, client };
   }
 
-  it('registers all 3 required tools', async () => {
+  it('registers all 8 required tools (Phase 00 + Phase 02)', async () => {
     const db = initDatabase({ dbPath: ':memory:' });
     const service = new GameService(db);
     const { client, server } = await setupMcpClient(service);
@@ -37,6 +37,11 @@ describe('MCP Server v2 Integration & Tool Contracts', () => {
     expect(toolNames).toContain('get_game_state');
     expect(toolNames).toContain('resolve_test_attack');
     expect(toolNames).toContain('get_event_log');
+    expect(toolNames).toContain('get_game_context');
+    expect(toolNames).toContain('get_pending_actions');
+    expect(toolNames).toContain('propose_resolution');
+    expect(toolNames).toContain('resolve_action');
+    expect(toolNames).toContain('publish_narration');
 
     await client.close();
     await server.close();

@@ -1,6 +1,6 @@
 # AI Dungeon Master - MCP-first D&D Tabletop
 
-Status: **Phase 00 (MCP PoC) & Phase 01 (Game Core) implemented and verified** (2026-10-20).
+Status: **Phase 00 (MCP PoC), Phase 01 (Game Core), and Phase 02 (AI-DM Workflow) implemented and verified** (2026-10-20).
 
 ## Mission
 
@@ -151,3 +151,30 @@ npm run db:reset
   - `MOVE`: 2D spatial coordinate updates.
   - `REST`: short/long rests restoring character vitality.
 - Event replay (`commandService.replayEvents(campaignId)`) verifies state consistency from immutable audit logs.
+
+---
+
+## Phase 02: AI-DM MCP Workflow
+
+### MCP tools (8 total)
+Phase 00 tools (`get_game_state`, `resolve_test_attack`, `get_event_log`) plus:
+
+| Tool | Purpose |
+|---|---|
+| `get_game_context` | Sanitized scene + party + recent narrations. **Hidden traps/monsters are filtered server-side and never returned.** |
+| `get_pending_actions` | Queued player intentions waiting for DM resolution. |
+| `propose_resolution` | DM proposes check/DC/rule citation **before** rolling (SRD citation in `proposedRuleCitation`). |
+| `resolve_action` | Executes ATTACK/HEAL/APPLY_DAMAGE/MOVE/REST atomically; consumes linked pending action. |
+| `publish_narration` | Writes narrative fiction to the event feed; **cannot mutate HP/AC/positions** (enforced server-side). |
+
+### One-operator continuation flow
+1. Players submit intents via `submitPlayerAction` (queue). MCP has **no push channel** — the operator tells the AI GUI to continue.
+2. DM reads `get_game_context` + `get_pending_actions`.
+3. DM proposes the check/DC (`propose_resolution`), **then** resolves (`resolve_action` or ability check via `resolveAbilityCheck`).
+4. DM publishes narration (`publish_narration`) using only returned outcomes.
+5. Tool calls may require host confirmation (ChatGPT approval dialogs); design assumes human-initiated turns.
+
+### Demo & verification
+```bash
+npm run scene:demo   # Full Thai-language story scene: queue -> propose -> check -> narrate (data/scene-demo.db)
+```
