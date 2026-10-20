@@ -1,6 +1,6 @@
 # AI Dungeon Master - MCP-first D&D Tabletop
 
-Status: **design complete; implementation not started** (2026-10-20).
+Status: **Phase 00 PoC implemented and verified** (2026-10-20).
 
 ## Mission
 
@@ -60,3 +60,70 @@ MCP does **not** itself provide a model. The AI GUI still requires an eligible a
 - https://ts.sdk.modelcontextprotocol.io/v2/
 - https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt
 - https://www.dndbeyond.com/srd
+
+## Quickstart (Phase 00 PoC)
+
+### 1. Requirements
+- Node.js v22+ (v26 LTS recommended; uses built-in `node:sqlite` and web standard streams)
+- npm v10+
+
+### 2. Install dependencies
+```bash
+npm install
+```
+
+### 3. Run automated tests and typecheck
+```bash
+npm test               # Run all 18 Vitest unit & integration tests
+npm run typecheck      # Verify TypeScript types with tsc --noEmit
+```
+
+### 4. Run MCP client smoke test
+Executes the full 5-step manual acceptance sequence against an in-process MCP server with SQLite persistence:
+```bash
+npm run smoke:client
+```
+
+### 5. Running the MCP Server
+
+#### Stdio Transport (Default)
+For local AI clients (Claude Desktop, MCP Inspector, local host CLI):
+```bash
+npm start
+```
+
+#### HTTP Transport (For Remote AI GUIs / Tunnels)
+For ChatGPT custom MCP connector, ngrok, or cloud tunnels:
+```bash
+npm run start:http
+# Default listens on http://127.0.0.1:3000/mcp
+# Custom port/host:
+npx tsx src/index.ts --http --port 8080 --host 0.0.0.0
+```
+
+Check server health:
+```bash
+curl http://127.0.0.1:3000/health
+```
+
+Test smoke client against the running HTTP server:
+```bash
+npx tsx scripts/smoke-client.ts --url http://127.0.0.1:3000/mcp
+```
+
+### 6. Reset Database Fixture
+Removes existing state and re-seeds `poc-campaign` (Hero 20/20 HP, Goblin 7/7 HP, Version 0):
+```bash
+npm run db:reset
+```
+
+## MCP Tools Exposed
+
+1. `get_game_state({ campaignId })`: Returns current `stateVersion` and sanitized character HP / AC.
+2. `resolve_test_attack({ campaignId, actionId, expectedVersion, attackerId, targetId })`: Rolls d20 and damage dice server-side, applies damage atomically, logs event, and checks state version and idempotency.
+3. `get_event_log({ campaignId, limit })`: Bounded chronological audit log of game events.
+
+## AI-GUI Host Integration Guide & Known Blockers
+
+- **ChatGPT Custom Actions / MCP**: Requires a public HTTPS endpoint (or secure tunnel such as Cloudflare Tunnel / ngrok) and is subject to workspace role gating. Localhost alone is not directly reachable by ChatGPT cloud servers.
+- **Authentication**: Set environment variable `MCP_AUTH_TOKEN=<secret>` to enforce Bearer token verification on all incoming MCP HTTP requests.
